@@ -2,31 +2,10 @@
 
 本文件夹包含与 VTube Studio API 交互的相关文件，用于实现 LLM_vtuber 项目中与 Live2D 虚拟主播的交互功能。
 文件结构：
-live2d_main.py：live2d控制主函数
-live2d_contral.py：live2d控制事件函数
-请求结构和方式：
+live2d_base_centrol.py：live2d控制代码
+通过切换状态来控制live2d模型的行为
+RequestHandler(BaseHTTPRequestHandler)获取请求并解析json，设置状态
 
-使用WebSocket协议接收JSON格式的请求
-支持的命令包括：handle_event（处理各种事件）、connect（连接VTube Studio）、disconnect（断开连接）
-live2d_contral.py主要功能：
-
-Live2DController类：封装所有事件处理功能
-连接和认证管理：connect_and_auth()、disconnect()
-统一事件处理入口：handle_event()
-具体事件处理函数：
-speak()：处理讲话事件，根据情绪激活相应表情
-expression()：处理表情事件，激活/停用指定表情
-move()：处理移动事件，根据参数移动模型
-live2d_main.py主要功能：
-
-Live2DMainServer类：实现主控服务器
-服务器启动和停止：start()、stop()
-客户端连接处理：handle_client()
-请求处理：process_request()，解析JSON请求并调用相应函数
-参数设计：
-
-每个事件处理函数都接受统一的参数：事件类型、情绪、持续时间、是否打断原本对话、额外参数
-支持根据情绪调整行为（如移动速度、表情选择等）
 vtuber_studio_info.py：基于vtuber_studio原文档的所有python操作实现
 vtuberapi.md:vtuber_studio原文档
 ## 文件夹内容
