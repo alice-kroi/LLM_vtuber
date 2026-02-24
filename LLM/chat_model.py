@@ -1,341 +1,268 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-聊天模型模块
-基于langgraph实现，提供多种LLM框架的聊天节点函数
-为stategraph提供聊天节点功能，图结构创建由其他程序负责
+聊天模型模块 - 使用TypedDict定义langgraph状态结构
 """
 
-from typing import Dict, Any, List, Optional
-import json
-
-# 尝试导入各种LLM框架
-try:
-    import openai
-except ImportError:
-    print("警告: OpenAI库未安装，OpenAI模型不可用")
-    openai = None
-
-try:
-    from doubao import Doubao
-except ImportError:
-    print("警告: 豆包库未安装，豆包模型不可用")
-    Doubao = None
-
-try:
-    import ollama
-except ImportError:
-    print("警告: Ollama库未安装，Ollama模型不可用")
-    ollama = None
-
-
-# 定义聊天状态
-class ChatState:
+from typing_extensions import TypedDict
+from langchain_core.messages import AnyMessage
+from typing import Optional
+import os
+from openai import OpenAI
+from langchain_core.runnables import RunnableConfig
+from langgraph.graph import START, END
+from langgraph.graph import StateGraph
+class ChatState(TypedDict):
     """
-    聊天状态类，用于在langgraph中传递数据
-    可被其他程序导入和使用
+    langgraph聊天状态定义 - 使用TypedDict确保类型安全
+    
+    字段说明：
+    - messages: 对话历史，包含所有消息
+    - system_prompt: 系统提示词，定义AI的角色和行为
+    - question: 当前用户问题
+    - response: 最新响应内容
+    - model: 使用的模型名称
+    - temperature: 温度参数，控制输出随机性
+    - max_tokens: 最大生成token数
+    - error: 错误信息（如有）
+    - tokens_used: 使用的token数
     """
-    def __init__(self, messages: Optional[List[Dict[str, str]]] = None, 
-                 config: Optional[Dict[str, Any]] = None):
-        self.messages = messages or []
-        self.config = config or {}
-        self.response = ""
-        self.model = ""
-        self.tokens_used = 0
-        self.error = None
+    messages: list[AnyMessage]      # 对话历史（使用langchain的AnyMessage类型）
+    system_prompt: str              # 系统提示词
+    response: Optional[str] = None  # 最新响应
+    model: str = "doubao-seed-1-8-251228"       # 模型名称（默认豆包）
+    temperature: float = 0.7        # 温度参数
+    max_tokens: int = 1024          # 最大token数
+    error: Optional[str] = None     # 错误信息
+    tokens_used: int = 0            # 使用的token数
+    api_key: Optional[str] = os.getenv("Doubao_API_KEY")  # API密钥（如果需要）
+    api_url: Optional[str] = os.getenv("Doubao_API_URL")  # API URL（如果需要）
 
 
-# ------------------------------
-# 聊天节点函数 - 可被其他程序作为节点使用
-# ------------------------------
+
+
+
 
 def openai_chat_node(state: ChatState) -> ChatState:
     """
-    OpenAI聊天节点函数
-    可直接作为langgraph的节点使用
+    使用OpenAI API的聊天节点函数
     
     Args:
-        state: 当前聊天状态，包含messages和config
+        state: 聊天状态对象
         
     Returns:
-        ChatState: 更新后的聊天状态
+        更新后的聊天状态，包含AI响应
     """
-    if openai is None:
-        state.error = "OpenAI库未安装"
-        return state
-    
     try:
-        # 设置API密钥
-        if "api_key" in state.config:
-            openai.api_key = state.config["api_key"]
+        # 1. 从环境变量获取OpenAI API配置
+        api_key = os.getenv("OPENAI_API_KEY")
+        api_base = os.getenv("OPENAI_API_URL")  # 可选的API地址
         
-        if "base_url" in state.config:
-            openai.api_base = state.config["base_url"]
+        if not api_key:
+            raise ValueError("环境变量 OPENAI_API_KEY 未设置")
         
-        # 调用OpenAI API
-        response = openai.chat.completions.create(
-            model=state.config.get("model", "gpt-3.5-turbo"),
-            messages=state.messages,
-            temperature=state.config.get("temperature", 0.7),
-            max_tokens=state.config.get("max_tokens", 1024),
-            top_p=state.config.get("top_p", 1.0),
-            frequency_penalty=state.config.get("frequency_penalty", 0.0),
-            presence_penalty=state.config.get("presence_penalty", 0.0)
+        # 2. 创建OpenAI客户端
+        client_params = {"api_key": api_key}
+        if api_base:
+            client_params["base_url"] = api_base
+            
+        client = OpenAI(**client_params)
+        
+        # 3. 构建消息列表（转换为OpenAI兼容格式）
+        openai_messages = []
+        
+        # 添加系统提示词（如果有）
+        if state["system_prompt"]:
+            openai_messages.append({"role": "system", "content": state["system_prompt"]})
+        
+        # 添加对话历史
+        for msg in state["messages"]:
+            # 转换langchain消息到OpenAI消息格式
+            openai_role = msg.role if hasattr(msg, "role") else "user"
+            openai_content = msg.content if hasattr(msg, "content") else str(msg)
+            openai_messages.append({"role": openai_role, "content": openai_content})
+        
+        # 4. 调用OpenAI API
+        response = client.chat.completions.create(
+            model=state["model"],
+            messages=openai_messages,
+            temperature=state["temperature"],
+            max_tokens=state["max_tokens"],
+            top_p=state.get("top_p", 1.0),  # 可选参数
+            frequency_penalty=state.get("frequency_penalty", 0.0),  # 可选参数
+            presence_penalty=state.get("presence_penalty", 0.0)  # 可选参数
         )
         
-        # 更新状态
-        state.response = response.choices[0].message.content
-        state.model = response.model
-        state.tokens_used = response.usage.total_tokens
-        state.error = None
+        # 5. 解析响应
+        message = response.choices[0].message
+        # 处理消息内容 - 优先使用 content
+        ai_response = message.content if hasattr(message, "content") and message.content else ""
         
-        # 将回复添加到消息历史
-        state.messages.append({
-            "role": "assistant",
-            "content": state.response
-        })
+        # 解析 token 使用情况
+        tokens_used = response.usage.total_tokens if hasattr(response.usage, "total_tokens") else 0
+        
+        # 6. 可选：打印配置信息（如果提供）
+        if state.get("config") and "configurable" in state.get("config", {}):
+            user_id = state.get("config", {}).get("configurable", {}).get("user_id", "unknown")
+            print(f"[OpenAI] 处理用户请求 - 用户ID: {user_id}")
+        
+        # 7. 更新状态并返回
+        return ChatState(
+            messages=state["messages"],  # 保持原始消息列表
+            system_prompt=state["system_prompt"],
+            question=state["question"],
+            response=ai_response,  # 更新响应
+            model=state["model"],
+            temperature=state["temperature"],
+            max_tokens=state["max_tokens"],
+            error=None,  # 清除错误
+            tokens_used=tokens_used  # 更新使用的token数
+        )
         
     except Exception as e:
-        state.error = f"OpenAI API错误: {str(e)}"
-        state.response = ""
-        state.tokens_used = 0
+        # 处理错误并返回错误状态
+        error_msg = f"OpenAI API调用失败: {str(e)}"
+        
+        # 获取更详细的错误信息（如果可用）
+        if hasattr(e, "response") and hasattr(e.response, "text"):
+            try:
+                import json
+                error_details = json.loads(e.response.text)
+                if error_details.get("error"):
+                    error_msg += f" - 详情: {error_details['error']}"
+            except:
+                pass
+        
+        return ChatState(
+            **state,  # 保持其他状态不变
+            response="",  # 清除响应
+            error=error_msg  # 设置错误信息
+        )
     
-    return state
 
 
 def doubao_chat_node(state: ChatState) -> ChatState:
     """
-    豆包聊天节点函数
-    可直接作为langgraph的节点使用
+    使用豆包API的聊天节点函数（基于OpenAI兼容接口）
     
     Args:
-        state: 当前聊天状态，包含messages和config
+        state: 聊天状态对象
+        config: 可选的RunnableConfig（包含用户ID等配置）
         
     Returns:
-        ChatState: 更新后的聊天状态
+        更新后的聊天状态，包含AI响应
     """
-    if Doubao is None:
-        state.error = "豆包库未安装"
-        return state
-    
     try:
-        # 创建豆包客户端
-        doubao = Doubao(
-            api_key=state.config["api_key"],
-            secret_key=state.config["secret_key"]
+        # 1. 从环境变量获取豆包API配置
+        api_key = os.getenv("Doubao_API_KEY")
+        api_base = os.getenv("Doubao_API_URL", "https://api.doubao.com/v1/")
+        
+        if not api_key:
+            raise ValueError("环境变量 Doubao_API_KEY 未设置")
+        
+        # 2. 创建OpenAI客户端（豆包API兼容OpenAI接口）
+        client = OpenAI(
+            api_key=api_key,
+            base_url=api_base  # 豆包API地址
         )
         
-        # 调用豆包API
-        response = doubao.chat.completions.create(
-            model=state.config.get("model", "doubao-pro"),
-            messages=state.messages,
-            temperature=state.config.get("temperature", 0.7),
-            max_tokens=state.config.get("max_tokens", 1024)
+        # 3. 构建消息列表（转换为OpenAI/豆包兼容格式）
+        doubao_messages = []
+        
+        # 添加系统提示词（如果有）
+        if state["system_prompt"]:
+            doubao_messages.append({"role": "system", "content": state["system_prompt"]})
+        
+        # 添加对话历史
+        for msg in state["messages"]:
+            # 转换langchain消息到豆包兼容格式
+            msg_role = msg.role if hasattr(msg, "role") else "user"
+            msg_content = msg.content if hasattr(msg, "content") else str(msg)
+            doubao_messages.append({"role": msg_role, "content": msg_content})
+        
+        # 4. 调用豆包API
+        response = client.chat.completions.create(
+            model=state["model"],  # 豆包模型名称
+            messages=doubao_messages,
+            temperature=state["temperature"],
+            max_tokens=state["max_tokens"],
+            top_p=state.get("top_p", 1.0),  # 可选参数
+            frequency_penalty=state.get("frequency_penalty", 0.0),  # 可选参数
+            presence_penalty=state.get("presence_penalty", 0.0)  # 可选参数
         )
+        #print(response)
+        # 5. 解析响应
+        message = response.choices[0].message
+        # 处理豆包特有的消息结构 - 优先使用 content，然后是 reasoning_content
+        ai_response = message.content if hasattr(message, "content") and message.content else getattr(message, "reasoning_content", "")
         
-        # 更新状态
-        state.response = response.choices[0].message.content
-        state.model = response.model
-        state.tokens_used = response.usage.total_tokens
-        state.error = None
+        # 解析 token 使用情况 - 处理不同的 usage 结构
+        tokens_used = 0
+        if hasattr(response, "usage"):
+            if hasattr(response.usage, "total_tokens"):
+                tokens_used = response.usage.total_tokens
+            elif hasattr(response.usage, "completion_tokens") and hasattr(response.usage, "prompt_tokens"):
+                tokens_used = response.usage.completion_tokens + response.usage.prompt_tokens
         
-        # 将回复添加到消息历史
-        state.messages.append({
-            "role": "assistant",
-            "content": state.response
-        })
         
-    except Exception as e:
-        state.error = f"豆包API错误: {str(e)}"
-        state.response = ""
-        state.tokens_used = 0
-    
-    return state
-
-
-def ollama_chat_node(state: ChatState) -> ChatState:
-    """
-    Ollama聊天节点函数
-    可直接作为langgraph的节点使用
-    
-    Args:
-        state: 当前聊天状态，包含messages和config
         
-    Returns:
-        ChatState: 更新后的聊天状态
-    """
-    if ollama is None:
-        state.error = "Ollama库未安装"
-        return state
-    
-    try:
-        # 调用Ollama API
-        response = ollama.chat(
-            model=state.config.get("model", "llama2"),
-            messages=state.messages,
-            options={
-                "temperature": state.config.get("temperature", 0.7),
-                "num_predict": state.config.get("max_tokens", 1024),
-                "top_p": state.config.get("top_p", 1.0)
-            }
-        )
-        
-        # 更新状态
-        state.response = response["message"]["content"]
-        state.model = state.config.get("model", "llama2")
-        state.tokens_used = response.get("eval_count", 0)
-        state.error = None
-        
-        # 将回复添加到消息历史
-        state.messages.append({
-            "role": "assistant",
-            "content": state.response
-        })
-        
-    except Exception as e:
-        state.error = f"Ollama API错误: {str(e)}"
-        state.response = ""
-        state.tokens_used = 0
-    
-    return state
-
-
-# ------------------------------
-# 辅助函数 - 方便测试和使用
-# ------------------------------
-
-def chat_with_llm(llm_type: str, messages: List[Dict[str, str]], config: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    简化的聊天接口，方便测试
-    
-    Args:
-        llm_type: LLM类型 ("openai", "doubao", "ollama")
-        messages: 消息历史
-        config: 配置参数
-        
-    Returns:
-        Dict[str, Any]: 聊天结果
-    """
-    # 创建状态
-    state = ChatState(messages, config)
-    
-    # 根据LLM类型调用相应的函数
-    if llm_type == "openai":
-        result_state = openai_chat_node(state)
-    elif llm_type == "doubao":
-        result_state = doubao_chat_node(state)
-    elif llm_type == "ollama":
-        result_state = ollama_chat_node(state)
-    else:
+        # 7. 更新状态并返回
         return {
-            "success": False,
-            "error": f"不支持的LLM类型: {llm_type}"
+            **state,  # 保持其他状态不变
+            "messages": state["messages"]+[
+                {"role": "assistant", "content": ai_response}
+            ],  # 添加AI响应到消息列表
+            "response": ai_response,  # 更新响应
+            "tokens_used": tokens_used  # 更新使用的token数
         }
-    
-    # 转换为字典返回
-    return {
-        "success": result_state.error is None,
-        "response": result_state.response,
-        "model": result_state.model,
-        "tokens_used": result_state.tokens_used,
-        "messages": result_state.messages,
-        "error": result_state.error
-    }
+        
+    except Exception as e:
+        # 处理错误并返回错误状态
+        error_msg = f"豆包API调用失败: {str(e)}"
+        
+        # 获取更详细的错误信息（如果可用）
+        if hasattr(e, "response") and hasattr(e.response, "text"):
+            try:
+                import json
+                error_details = json.loads(e.response.text)
+                if error_details.get("error"):
+                    error_msg += f" - 详情: {error_details['error']}"
+            except:
+                pass
+        
+        return {
+            **state,  # 保持其他状态不变
+            "response": "",  # 清除响应
+            "error": error_msg  # 设置错误信息
+        }
 
 
-# ------------------------------
-# 示例用法
-# ------------------------------
 
 if __name__ == "__main__":
     """
-    示例用法 - 展示如何在其他程序中使用这些节点函数
+    豆包节点图测试主函数
     """
-    print("=== 聊天模型节点函数测试 ===")
-    
-    # 配置示例
-    configs = {
-        "openai": {
-            "api_key": "your_openai_api_key",
-            "model": "gpt-3.5-turbo"
-        },
-        "doubao": {
-            "api_key": "your_doubao_api_key",
-            "secret_key": "your_doubao_secret_key",
-            "model": "doubao-pro"
-        },
-        "ollama": {
-            "model": "llama2"
-        }
-    }
-    
-    # 测试消息
-    test_messages = [
-        {"role": "system", "content": "你是一个帮助用户的助手。"},
-        {"role": "user", "content": "你好，能介绍一下你自己吗？"}
-    ]
-    
-    # 测试OpenAI
-    if openai:
-        print("\n1. 测试OpenAI节点函数:")
-        state = ChatState(test_messages.copy(), configs["openai"])
-        result_state = openai_chat_node(state)
-        if result_state.error is None:
-            print(f"回复: {result_state.response}")
-            print(f"模型: {result_state.model}")
-            print(f"Token使用: {result_state.tokens_used}")
-        else:
-            print(f"错误: {result_state.error}")
-    
-    # 测试豆包
-    if Doubao:
-        print("\n2. 测试豆包节点函数:")
-        state = ChatState(test_messages.copy(), configs["doubao"])
-        result_state = doubao_chat_node(state)
-        if result_state.error is None:
-            print(f"回复: {result_state.response}")
-            print(f"模型: {result_state.model}")
-            print(f"Token使用: {result_state.tokens_used}")
-        else:
-            print(f"错误: {result_state.error}")
-    
-    # 测试Ollama
-    if ollama:
-        print("\n3. 测试Ollama节点函数:")
-        state = ChatState(test_messages.copy(), configs["ollama"])
-        result_state = ollama_chat_node(state)
-        if result_state.error is None:
-            print(f"回复: {result_state.response}")
-            print(f"模型: {result_state.model}")
-            print(f"Token使用: {result_state.tokens_used}")
-        else:
-            print(f"错误: {result_state.error}")
-    
-    print("\n=== 在其他程序中使用示例 ===")
-    print("""
-# 示例：在其他程序中使用这些节点函数创建langgraph图
-from langgraph.graph import StateGraph
-from LLM.chat_model import ChatState, openai_chat_node, doubao_chat_node, ollama_chat_node
-
-# 创建状态图
-graph = StateGraph(ChatState)
-
-# 添加节点
-graph.add_node("openai_chat", openai_chat_node)
-graph.add_node("doubao_chat", doubao_chat_node)
-graph.add_node("ollama_chat", ollama_chat_node)
-
-# 设置边和入口/出口节点
-# ...（根据需求配置）
-
-# 编译图
-app = graph.compile()
-
-# 使用图
-result = app.invoke({
-    "messages": [{"role": "user", "content": "你好！"}],
-    "config": {
-        "api_key": "your_api_key",
-        "model": "gpt-3.5-turbo"
-    }
-})
-    """)
+    try:
+        # 创建状态图
+        graph = StateGraph(ChatState)
+        
+        # 添加豆包聊天节点
+        graph.add_node("node_a", doubao_chat_node)
+        
+        # 设置图结构
+        graph.add_edge(START, "node_a")
+        graph.add_edge("node_a", END)
+        
+        # 编译图
+        app = graph.compile()
+    except Exception as e:
+        print(f"创建状态图失败: {str(e)}")
+        exit(1)
+    result1 = app.invoke({
+            "messages": [{"role": "user", "content": "你好，我是一名开发者。"}],
+            "model": "doubao-seed-1-8-251228",
+            "temperature": 0.7,
+            "max_tokens": 500,
+            "system_prompt": "你是一个友好的AI助手，用简洁明了的语言回答用户的问题。"
+        })
+    print(result1)
