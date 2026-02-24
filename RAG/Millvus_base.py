@@ -17,7 +17,7 @@ class DoubaoEmbeddings(Embeddings):
             api_key=api_key or os.getenv("Doubao_API_KEY")  # 可以替换为环境变量
         )
         self.model = model
-        self.vector_dim = 768  # 明确向量维度
+        self.vector_dim = 2560  # 明确向量维度
     
     def embed_documents(self, texts):
         """为文档列表生成嵌入向量"""
@@ -493,9 +493,10 @@ def run_tests(client: MilvusClient, collection_name: str, embedding_model: Embed
     
 if __name__ == "__main__":
     # 初始化参数
+   
     uri = "http://localhost:19530"
     token = "root:Milvus"
-    db_name = "vtuber"
+    db_name = "LLM_vtuber"
     collection_name = "chat_history"
     
     # 初始化Milvus客户端
