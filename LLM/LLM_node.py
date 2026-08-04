@@ -12,7 +12,7 @@ from typing import Optional, Dict, List, Union, Any
 import logging
 import time
 
-from .chat_model import ChatState, doubao_chat_node
+from chat_model import ChatState, doubao_chat_node
 
 
 logger = logging.getLogger(__name__)
@@ -26,9 +26,11 @@ class LLMState(ChatState):
     - 继承自 ChatState 的所有字段
     - question: 当前用户问题
     - context: 上下文信息
+    - name: 消息发送者名称（对应OpenAI message格式中的name字段）
     """
     question: Optional[str] = None  # 当前用户问题
     context: Optional[str] = None   # 上下文信息
+    name: Optional[str] = None      # 消息发送者名称
 
 
 def llm_chat_node(state: LLMState) -> LLMState:
@@ -54,7 +56,8 @@ def llm_chat_node(state: LLMState) -> LLMState:
             temperature=state["temperature"],
             max_tokens=state["max_tokens"],
             api_key=state.get("api_key"),
-            api_url=state.get("api_url")
+            api_url=state.get("api_url"),
+            name=state.get("name")
         )
         
         # 调用豆包聊天节点生成回答
@@ -120,7 +123,8 @@ def context_aware_qa_node(state: LLMState) -> LLMState:
             system_prompt=enhanced_system_prompt,
             model=state["model"],
             temperature=state["temperature"],
-            max_tokens=state["max_tokens"]
+            max_tokens=state["max_tokens"],
+            name=state.get("name")
         )
         
         # 调用豆包聊天节点生成回答

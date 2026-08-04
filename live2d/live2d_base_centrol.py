@@ -8,6 +8,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 from urllib.parse import parse_qs, urlparse
+import math
 
 # 添加项目根目录到sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,6 +20,14 @@ t = 0
 direction_x = 0 
 direction_y = 0 
 direction_z = 0 
+
+# 鼠标位置追踪
+global_mouse_pos = {"x": 0.5, "y": 0.5}  # 归一化坐标 (0-1)
+mouse_filtered = {"x": 0.5, "y": 0.5}  # 滤波后的鼠标位置
+
+# 平滑参数
+SMOOTHING_FACTOR = 0.8  # 低通滤波系数
+MOUSE_SENSITIVITY = 100.0  # 鼠标灵敏度（增加以提高动作幅度）
 
 # 全局控制器实例，用于在HTTP处理器中访问
 global_controller = None
@@ -58,6 +67,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                     threading.Timer(duration, lambda: asyncio.run(global_controller.set_state("无事件"))).start()
             elif function == "无事件":
                 asyncio.run(global_controller.set_state("无事件"))
+            elif function == "update_mouse":
+                # 更新鼠标位置
+                mouse_x = params.get("x", 0.5)
+                mouse_y = params.get("y", 0.5)
+                global global_mouse_pos
+                global_mouse_pos = {"x": float(mouse_x), "y": float(mouse_y)}
+                print(f"更新鼠标位置: ({mouse_x}, {mouse_y})")
             else:
                 print(f"未知功能: {function}")
             
@@ -235,41 +251,78 @@ class Live2DBaseControl:
                 # 为每个有效参数生成基于其范围的微调值
                 parameter_values = []
                 global current_angles, velocities, t, direction_x, direction_y, direction_z
+                global global_mouse_pos, mouse_filtered, SMOOTHING_FACTOR, MOUSE_SENSITIVITY
                 t += 0.02  # 让运动更平滑
 
-                # 让方向有一定概率改变，避免持续朝同一方向
-                if random.random() < 0.5:  
-                    direction_x *= -1  
-                if random.random() < 0.5:
-                    direction_y *= -1  
-                if random.random() < 0.5:
-                    direction_z *= -1  
+                # 鼠标位置低通滤波
+                mouse_filtered["x"] = mouse_filtered["x"] * SMOOTHING_FACTOR + global_mouse_pos["x"] * (1 - SMOOTHING_FACTOR)
+                mouse_filtered["y"] = mouse_filtered["y"] * SMOOTHING_FACTOR + global_mouse_pos["y"] * (1 - SMOOTHING_FACTOR)
 
-                # 计算目标角度，并限制最大幅度
-                target_x = max(min(direction_x * noise.pnoise1(t, repeat=1000) * 10 + random.uniform(-3, 3), 15), -15)
-                target_y = max(min(direction_y * noise.pnoise1(t + 100, repeat=1000) * 20 + random.uniform(-5, 5), 20), -20)
-                target_z = max(min(direction_z * noise.pnoise1(t + 200, repeat=1000) * 25 + random.uniform(-8, 8), 25), -25)
+                # 根据鼠标位置计算目标角度
+                # 鼠标坐标归一化到 (-1, 1)
+                mouse_norm_x = (mouse_filtered["x"] - 0.5) * 2.0
+                mouse_norm_y = (mouse_filtered["y"] - 0.5) * 2.0
 
-                # 细微的抖动
-                micro_noise = lambda: noise.pnoise1(t * 8, repeat=1000) * 1.2
-                target_x += micro_noise()
-                target_y += micro_noise()
-                target_z += micro_noise()
+                # 计算基础目标角度（基于鼠标位置）
+                base_target_x = mouse_norm_y * MOUSE_SENSITIVITY * 1.5  # 垂直鼠标移动影响X角度（低头/抬头）
+                base_target_y = mouse_norm_x * MOUSE_SENSITIVITY * 1.5  # 水平鼠标移动影响Y角度（左右转头）
+                base_target_z = mouse_norm_x * MOUSE_SENSITIVITY * 1.0  # 水平鼠标移动影响Z角度（左右倾斜）
 
-                # 调整惯性，让运动更快调整方向
-                inertia = 0.75  
-                velocities["x"] = velocities["x"] * inertia + (target_x - current_angles["x"]) * (1 - inertia)
-                velocities["y"] = velocities["y"] * inertia + (target_y - current_angles["y"]) * (1 - inertia)
-                velocities["z"] = velocities["z"] * inertia + (target_z - current_angles["z"]) * (1 - inertia)
+                # 添加随机微动，增加自然感（增加幅度以提高动作幅度）
+                micro_noise = lambda: noise.pnoise1(t * 8, repeat=1000) * 3.0
+                target_x = base_target_x + micro_noise()
+                target_y = base_target_y + micro_noise()
+                target_z = base_target_z + micro_noise()
+
+                # 限制最大幅度（增加范围以提高动作幅度）
+                target_x = max(min(target_x, 25), -25)
+                target_y = max(min(target_y, 30), -30)
+                target_z = max(min(target_z, 35), -35)
+
+                # 使用 PID 控制算法优化运动平滑度
+                Kp = 0.3  # 比例系数
+                Ki = 0.01  # 积分系数
+                Kd = 0.2  # 微分系数
+
+                # 计算误差
+                error_x = target_x - current_angles["x"]
+                error_y = target_y - current_angles["y"]
+                error_z = target_z - current_angles["z"]
+
+                # 计算导数（速度）
+                derivative_x = error_x - velocities["x"]
+                derivative_y = error_y - velocities["y"]
+                derivative_z = error_z - velocities["z"]
+
+                # 更新速度
+                velocities["x"] = Kp * error_x + Kd * derivative_x
+                velocities["y"] = Kp * error_y + Kd * derivative_y
+                velocities["z"] = Kp * error_z + Kd * derivative_z
+
+                # 平滑速度变化
+                velocities["x"] = velocities["x"] * 0.8 + velocities["x"] * 0.2
+                velocities["y"] = velocities["y"] * 0.8 + velocities["y"] * 0.2
+                velocities["z"] = velocities["z"] * 0.8 + velocities["z"] * 0.2
 
                 # 更新角度
                 current_angles["x"] += velocities["x"]
                 current_angles["y"] += velocities["y"]
                 current_angles["z"] += velocities["z"]
+
+                # 限制最终角度范围（增加范围以提高动作幅度）
+                current_angles["x"] = max(min(current_angles["x"], 25), -25)
+                current_angles["y"] = max(min(current_angles["y"], 30), -30)
+                current_angles["z"] = max(min(current_angles["z"], 35), -35)
+
+                # 构建参数值
                 parameter_values =[
                     {"id": "FaceAngleX", "value": current_angles["x"]},
                     {"id": "FaceAngleY", "value": current_angles["y"]},
-                    {"id": "FaceAngleZ", "value": current_angles["z"]}
+                    {"id": "FaceAngleZ", "value": current_angles["z"]},
+                    {"id": "EyeLeftX", "value": mouse_norm_x * 0.8},  # 眼球跟随鼠标（增加系数以提高动作幅度）
+                    {"id": "EyeRightX", "value": mouse_norm_x * 0.8},
+                    {"id": "EyeLeftY", "value": -mouse_norm_y * 0.8},
+                    {"id": "EyeRightY", "value": -mouse_norm_y * 0.8}
                 ]
                 
                 # 发送参数数据，设置faceFound=True以表明我们在控制面部
@@ -284,19 +337,58 @@ class Live2DBaseControl:
                 await asyncio.sleep(1)
     
     async def handle_event_state(self):
-        """处理有事件状态（留空，等待后续实现）"""
+        """处理有事件状态，支持鼠标位置响应"""
         while self.running and self.current_state == "有事件":
-            # 有事件状态的代码将在这里实现
-            # 在有事件状态下，我们也应该持续发送参数以保持控制
             try:
-                # 发送基础参数以保持控制
+                global global_mouse_pos, mouse_filtered, SMOOTHING_FACTOR, MOUSE_SENSITIVITY
+                
+                # 鼠标位置低通滤波
+                mouse_filtered["x"] = mouse_filtered["x"] * SMOOTHING_FACTOR + global_mouse_pos["x"] * (1 - SMOOTHING_FACTOR)
+                mouse_filtered["y"] = mouse_filtered["y"] * SMOOTHING_FACTOR + global_mouse_pos["y"] * (1 - SMOOTHING_FACTOR)
+
+                # 根据鼠标位置计算目标角度
+                mouse_norm_x = (mouse_filtered["x"] - 0.5) * 2.0
+                mouse_norm_y = (mouse_filtered["y"] - 0.5) * 2.0
+
+                # 计算目标角度（有事件状态下更明显的响应）
+                target_x = mouse_norm_y * MOUSE_SENSITIVITY * 1.2
+                target_y = mouse_norm_x * MOUSE_SENSITIVITY * 1.2
+                target_z = mouse_norm_x * MOUSE_SENSITIVITY * 0.6
+
+                # 限制最大幅度（增加范围以提高动作幅度）
+                target_x = max(min(target_x, 25), -25)
+                target_y = max(min(target_y, 30), -30)
+                target_z = max(min(target_z, 35), -35)
+
+                # 平滑过渡到目标角度
+                global current_angles, velocities
+                inertia = 0.7
+                velocities["x"] = velocities["x"] * inertia + (target_x - current_angles["x"]) * (1 - inertia)
+                velocities["y"] = velocities["y"] * inertia + (target_y - current_angles["y"]) * (1 - inertia)
+                velocities["z"] = velocities["z"] * inertia + (target_z - current_angles["z"]) * (1 - inertia)
+
+                # 更新角度
+                current_angles["x"] += velocities["x"]
+                current_angles["y"] += velocities["y"]
+                current_angles["z"] += velocities["z"]
+
+                # 限制最终角度范围（增加范围以提高动作幅度）
+                current_angles["x"] = max(min(current_angles["x"], 25), -25)
+                current_angles["y"] = max(min(current_angles["y"], 30), -30)
+                current_angles["z"] = max(min(current_angles["z"], 35), -35)
+
+                # 构建参数值
                 parameter_values = [
-                    {"id": "ParamAngleX", "value": 0},
-                    {"id": "ParamAngleY", "value": 0},
-                    {"id": "ParamAngleZ", "value": 0},
-                    {"id": "ParamEyeLOpen", "value": 1.0},
-                    {"id": "ParamEyeROpen", "value": 1.0},
-                    {"id": "ParamMouthOpenY", "value": 0.0}
+                    {"id": "FaceAngleX", "value": current_angles["x"]},
+                    {"id": "FaceAngleY", "value": current_angles["y"]},
+                    {"id": "FaceAngleZ", "value": current_angles["z"]},
+                    {"id": "EyeOpenLeft", "value": 1.0},
+                    {"id": "EyeOpenRight", "value": 1.0},
+                    {"id": "EyeLeftX", "value": mouse_norm_x * 0.8},  # 眼球跟随鼠标（增加系数以提高动作幅度）
+                    {"id": "EyeRightX", "value": mouse_norm_x * 0.8},
+                    {"id": "EyeLeftY", "value": -mouse_norm_y * 0.8},
+                    {"id": "EyeRightY", "value": -mouse_norm_y * 0.8},
+                    {"id": "MouthOpen", "value": 0.3}  # 轻微张开嘴巴（增加幅度）
                 ]
                 
                 await self.api.inject_parameter_data(parameter_values, face_found=True, mode="set")
@@ -306,55 +398,73 @@ class Live2DBaseControl:
                 await asyncio.sleep(1)
     
     async def ask_state(self):
-        """处理回答问题状态，实现更明显的面部移动"""
-        # 使用与idle相同的面部移动逻辑，但调整参数使其更明显
+        """处理回答问题状态，支持鼠标位置响应和更明显的面部移动"""
         while self.running and self.current_state == "回答问题":
             try:
-                # 简单的面部移动
                 global current_angles, velocities, t, direction_x, direction_y, direction_z
+                global global_mouse_pos, mouse_filtered, SMOOTHING_FACTOR, MOUSE_SENSITIVITY
                 t += 0.02
                 
-                # 方向控制（比无事件状态下更大的变化）
-                if random.random() < 0.1:  # 降低方向改变的频率，让动作更流畅
-                    direction_x *= -1
-                if random.random() < 0.1:
-                    direction_y *= -1
-                if random.random() < 0.1:
-                    direction_z *= -1
+                # 鼠标位置低通滤波
+                mouse_filtered["x"] = mouse_filtered["x"] * SMOOTHING_FACTOR + global_mouse_pos["x"] * (1 - SMOOTHING_FACTOR)
+                mouse_filtered["y"] = mouse_filtered["y"] * SMOOTHING_FACTOR + global_mouse_pos["y"] * (1 - SMOOTHING_FACTOR)
+
+                # 根据鼠标位置计算目标角度
+                mouse_norm_x = (mouse_filtered["x"] - 0.5) * 2.0
+                mouse_norm_y = (mouse_filtered["y"] - 0.5) * 2.0
+
+                # 计算基础目标角度（基于鼠标位置）
+                base_target_x = mouse_norm_y * MOUSE_SENSITIVITY * 1.5
+                base_target_y = mouse_norm_x * MOUSE_SENSITIVITY * 1.5
+                base_target_z = mouse_norm_x * MOUSE_SENSITIVITY * 0.75
+
+                # 添加随机变化，增加自然感
+                random_factor = noise.pnoise1(t, repeat=1000) * 5
+                target_x = base_target_x + random_factor
+                target_y = base_target_y + random_factor
+                target_z = base_target_z + random_factor * 0.5
                 
-                # 更大幅度的面部角度变化
-                target_x = max(min(direction_x * noise.pnoise1(t, repeat=1000) * 20 + random.uniform(-5, 5), 30), -30)
-                target_y = max(min(direction_y * noise.pnoise1(t + 100, repeat=1000) * 25 + random.uniform(-8, 8), 35), -35)
-                target_z = max(min(direction_z * noise.pnoise1(t + 200, repeat=1000) * 30 + random.uniform(-10, 10), 40), -40)
+                # 限制最大幅度
+                target_x = max(min(target_x, 30), -30)
+                target_y = max(min(target_y, 35), -35)
+                target_z = max(min(target_z, 40), -40)
                 
-                # 添加细微抖动
-                micro_noise = lambda: noise.pnoise1(t * 8, repeat=1000) * 1.5
-                target_x += micro_noise()
-                target_y += micro_noise()
-                target_z += micro_noise()
-                
-                # 调整惯性
-                inertia = 0.7
+                # 调整惯性，实现平滑过渡
+                inertia = 0.65  # 更低的惯性，更快的响应
                 velocities["x"] = velocities["x"] * inertia + (target_x - current_angles["x"]) * (1 - inertia)
                 velocities["y"] = velocities["y"] * inertia + (target_y - current_angles["y"]) * (1 - inertia)
                 velocities["z"] = velocities["z"] * inertia + (target_z - current_angles["z"]) * (1 - inertia)
+                
+                # 平滑速度变化
+                velocities["x"] = velocities["x"] * 0.8 + velocities["x"] * 0.2
+                velocities["y"] = velocities["y"] * 0.8 + velocities["y"] * 0.2
+                velocities["z"] = velocities["z"] * 0.8 + velocities["z"] * 0.2
                 
                 # 更新角度
                 current_angles["x"] += velocities["x"]
                 current_angles["y"] += velocities["y"]
                 current_angles["z"] += velocities["z"]
                 
+                # 限制最终角度范围
+                current_angles["x"] = max(min(current_angles["x"], 30), -30)
+                current_angles["y"] = max(min(current_angles["y"], 35), -35)
+                current_angles["z"] = max(min(current_angles["z"], 40), -40)
+                
                 # 口型配合 - 随机变化的嘴巴张开程度
                 mouth_open = 0.3 + random.uniform(0.2, 0.5) * noise.pnoise1(t * 5, repeat=1000)
                 mouth_open = max(0.1, min(0.9, mouth_open))  # 限制在0.1到0.9之间
                 
-                # 构建参数列表（注意使用正确的参数名）
+                # 构建参数列表
                 parameter_values = [
                     {"id": "FaceAngleX", "value": current_angles["x"]},
                     {"id": "FaceAngleY", "value": current_angles["y"]},
                     {"id": "FaceAngleZ", "value": current_angles["z"]},
                     {"id": "EyeOpenLeft", "value": 1.0},
                     {"id": "EyeOpenRight", "value": 1.0},
+                    {"id": "EyeLeftX", "value": mouse_norm_x * 0.8},  # 眼球跟随鼠标（增加系数以提高动作幅度）
+                    {"id": "EyeRightX", "value": mouse_norm_x * 0.8},
+                    {"id": "EyeLeftY", "value": -mouse_norm_y * 0.8},
+                    {"id": "EyeRightY", "value": -mouse_norm_y * 0.8},
                     {"id": "MouthOpen", "value": mouth_open}
                 ]
                 

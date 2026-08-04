@@ -6,6 +6,9 @@ import uuid
 import time
 import numpy as np
 import os
+import threading
+import weakref
+from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
@@ -47,35 +50,263 @@ class DoubaoEmbeddings(Embeddings):
             # 如果API调用失败，返回随机向量作为备选
             return np.random.random(self.vector_dim).tolist()
         
+class MilvusConnectionManager:
+    _instances: Dict[str, 'MilvusConnectionManager'] = {}
+    _instance_lock = threading.Lock()
+
+    def __new__(cls, uri: str = "http://localhost:19530",
+                token: str = "root:Milvus",
+                db_name: str = "vtuber",
+                **kwargs):
+        key = f"{uri}_{token}_{db_name}"
+        with cls._instance_lock:
+            if key not in cls._instances:
+                instance = super().__new__(cls)
+                cls._instances[key] = instance
+            else:
+                instance = cls._instances[key]
+        return instance
+
+    def __init__(self, uri: str = "http://localhost:19530",
+                 token: str = "root:Milvus",
+                 db_name: str = "vtuber",
+                 max_idle_time: int = 300,
+                 connection_timeout: int = 10,
+                 retry_count: int = 3,
+                 retry_delay: float = 1.0):
+        if hasattr(self, '_initialized') and self._initialized:
+            return
+
+        self.uri = uri
+        self.token = token
+        self.db_name = db_name
+        self.max_idle_time = max_idle_time
+        self.connection_timeout = connection_timeout
+        self.retry_count = retry_count
+        self.retry_delay = retry_delay
+
+        self._client: Optional[MilvusClient] = None
+        self._lock = threading.Lock()
+        self._last_used_time = 0.0
+        self._connection_count = 0
+        self._operation_count = 0
+        self._is_initializing = False
+        self._initialized = True
+
+        self._connection_status = "disconnected"
+        self._error_message = ""
+        self._last_reconnect_time = 0.0
+
+    def _create_client(self) -> MilvusClient:
+        """创建新的Milvus客户端连接"""
+        try:
+            client = MilvusClient(
+                uri=self.uri,
+                token=self.token,
+                db_name=self.db_name,
+                timeout=self.connection_timeout
+            )
+            self._connection_status = "connected"
+            self._error_message = ""
+            logger.info(f"成功创建Milvus客户端连接: {self.uri}, db={self.db_name}")
+            return client
+        except Exception as e:
+            self._connection_status = "error"
+            self._error_message = str(e)
+            logger.error(f"创建Milvus客户端连接失败: {e}")
+            raise
+
+    def _check_connection(self) -> bool:
+        """检查连接是否有效"""
+        if self._client is None:
+            return False
+        try:
+            self._client.list_collections()
+            return True
+        except Exception:
+            return False
+
+    def _reconnect(self) -> bool:
+        """尝试重新连接"""
+        with self._lock:
+            if self._is_initializing:
+                return False
+            self._is_initializing = True
+            try:
+                if self._client:
+                    try:
+                        self._client.close()
+                    except Exception:
+                        pass
+                    self._client = None
+
+                for attempt in range(self.retry_count):
+                    try:
+                        self._client = self._create_client()
+                        self._last_reconnect_time = time.time()
+                        self._connection_status = "connected"
+                        self._error_message = ""
+                        logger.info(f"Milvus重新连接成功，尝试次数: {attempt + 1}")
+                        return True
+                    except Exception as e:
+                        logger.warning(f"Milvus重新连接失败，尝试 {attempt + 1}/{self.retry_count}: {e}")
+                        if attempt < self.retry_count - 1:
+                            time.sleep(self.retry_delay * (attempt + 1))
+
+                self._connection_status = "disconnected"
+                self._error_message = f"重新连接失败，已尝试 {self.retry_count} 次"
+                logger.error(self._error_message)
+                return False
+            finally:
+                self._is_initializing = False
+
+    def get_client(self) -> MilvusClient:
+        """获取Milvus客户端实例（连接复用）"""
+        with self._lock:
+            self._last_used_time = time.time()
+            self._operation_count += 1
+
+            if self._client is None:
+                self._client = self._create_client()
+                self._connection_count += 1
+                logger.info(f"[连接复用] 创建新连接: {self.uri}, db={self.db_name}, 连接计数={self._connection_count}")
+                return self._client
+
+            if not self._check_connection():
+                if self._reconnect():
+                    self._connection_count += 1
+                    logger.info(f"[连接复用] 重新连接成功: {self.uri}, db={self.db_name}, 连接计数={self._connection_count}")
+                    return self._client
+                else:
+                    raise Exception(f"Milvus连接失败: {self._error_message}")
+
+            logger.debug(f"[连接复用] 使用已有连接: {self.uri}, db={self.db_name}, 连接计数={self._connection_count}")
+            return self._client
+
+    def close(self):
+        """关闭连接"""
+        with self._lock:
+            if self._client:
+                try:
+                    self._client.close()
+                    logger.info(f"已关闭Milvus客户端连接: {self.uri}")
+                except Exception as e:
+                    logger.error(f"关闭Milvus客户端连接失败: {e}")
+                self._client = None
+                self._connection_status = "disconnected"
+
+    def get_connection_status(self) -> Dict[str, Any]:
+        """获取连接状态信息"""
+        with self._lock:
+            return {
+                "status": self._connection_status,
+                "uri": self.uri,
+                "db_name": self.db_name,
+                "connection_count": self._connection_count,
+                "operation_count": self._operation_count,
+                "last_used_time": time.strftime(
+                    "%Y-%m-%d %H:%M:%S",
+                    time.localtime(self._last_used_time)
+                ) if self._last_used_time > 0 else "从未使用",
+                "last_reconnect_time": time.strftime(
+                    "%Y-%m-%d %H:%M:%S",
+                    time.localtime(self._last_reconnect_time)
+                ) if self._last_reconnect_time > 0 else "从未重连",
+                "error_message": self._error_message
+            }
+
+    def is_connected(self) -> bool:
+        """检查是否已连接"""
+        return self._connection_status == "connected"
+
+    def reset_stats(self):
+        """重置统计信息"""
+        with self._lock:
+            self._connection_count = 0
+            self._operation_count = 0
+            self._last_used_time = 0.0
+            self._last_reconnect_time = 0.0
+
+    @classmethod
+    def get_all_instances(cls) -> List['MilvusConnectionManager']:
+        """获取所有连接管理器实例"""
+        with cls._instance_lock:
+            return list(cls._instances.values())
+
+    @classmethod
+    def close_all(cls):
+        """关闭所有连接"""
+        with cls._instance_lock:
+            for instance in cls._instances.values():
+                instance.close()
+
 def init_milvus_client(
     uri: str = "http://localhost:19530",
     token: str = "root:Milvus",
-    db_name: str = "vtuber"
+    db_name: str = "vtuber",
+    max_idle_time: int = 300,
+    connection_timeout: int = 10,
+    retry_count: int = 3,
+    retry_delay: float = 1.0
 ) -> MilvusClient:
     """
-    初始化Milvus客户端
+    初始化Milvus客户端（使用连接复用）
     
     Args:
         uri: Milvus服务地址
         token: 认证令牌
         db_name: 数据库名称
+        max_idle_time: 最大空闲时间（秒）
+        connection_timeout: 连接超时时间（秒）
+        retry_count: 重连尝试次数
+        retry_delay: 重连间隔时间（秒）
         
     Returns:
-        MilvusClient: 初始化后的Milvus客户端
+        MilvusClient: 初始化后的Milvus客户端（复用连接）
     
     Raises:
         Exception: 客户端初始化失败时抛出异常
     """
     try:
-        client = MilvusClient(
+        manager = MilvusConnectionManager(
             uri=uri,
             token=token,
-            db_name=db_name
+            db_name=db_name,
+            max_idle_time=max_idle_time,
+            connection_timeout=connection_timeout,
+            retry_count=retry_count,
+            retry_delay=retry_delay
         )
-        print(f"成功连接到Milvus服务: {uri}")
+        client = manager.get_client()
         return client
     except Exception as e:
         raise Exception(f"Milvus客户端初始化失败: {e}")
+
+
+def get_connection_manager(
+    uri: str = "http://localhost:19530",
+    token: str = "root:Milvus",
+    db_name: str = "vtuber",
+    **kwargs
+) -> MilvusConnectionManager:
+    """
+    获取Milvus连接管理器实例
+    
+    Args:
+        uri: Milvus服务地址
+        token: 认证令牌
+        db_name: 数据库名称
+        **kwargs: 其他连接参数
+        
+    Returns:
+        MilvusConnectionManager: 连接管理器实例
+    """
+    return MilvusConnectionManager(
+        uri=uri,
+        token=token,
+        db_name=db_name,
+        **kwargs
+    )
     
 def create_database(client: MilvusClient, db_name: str) -> bool:
     """

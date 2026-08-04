@@ -26,6 +26,14 @@ class ChatState(TypedDict):
     - max_tokens: 最大生成token数
     - error: 错误信息（如有）
     - tokens_used: 使用的token数
+    - name: 消息发送者名称（对应OpenAI message格式中的name字段）
+    - tts_played: TTS是否播放成功
+    - tts_duration: TTS音频时长（秒）
+    - tts_tone: TTS使用的语气
+    - tts_content: TTS合成的内容
+    - tts_error: TTS错误信息（如有）
+    - tone: 提取的语气
+    - content: 提取的内容（去掉语气标记）
     """
     messages: list[AnyMessage]      # 对话历史（使用langchain的AnyMessage类型）
     system_prompt: str              # 系统提示词
@@ -36,7 +44,17 @@ class ChatState(TypedDict):
     error: Optional[str] = None     # 错误信息
     tokens_used: int = 0            # 使用的token数
     api_key: Optional[str] = os.getenv("Doubao_API_KEY")  # API密钥（如果需要）
+    # TTS相关字段
+    tts_played: bool = False        # TTS是否播放成功
+    tts_duration: float = 0.0       # TTS音频时长（秒）
+    tts_tone: Optional[str] = None  # TTS使用的语气
+    tts_content: Optional[str] = None  # TTS合成的内容
+    tts_error: Optional[str] = None  # TTS错误信息
+    # 语气和内容字段
+    tone: Optional[str] = None      # 提取的语气
+    content: Optional[str] = None   # 提取的内容
     api_url: Optional[str] = os.getenv("Doubao_API_URL")  # API URL（如果需要）
+    name: Optional[str] = None      # 消息发送者名称
 
 
 
@@ -80,7 +98,13 @@ def openai_chat_node(state: ChatState) -> ChatState:
             # 转换langchain消息到OpenAI消息格式
             openai_role = msg.role if hasattr(msg, "role") else "user"
             openai_content = msg.content if hasattr(msg, "content") else str(msg)
-            openai_messages.append({"role": openai_role, "content": openai_content})
+            # 检查是否有name字段
+            openai_name = msg.name if hasattr(msg, "name") else state.get("name")
+            # 构建消息对象
+            message_obj = {"role": openai_role, "content": openai_content}
+            if openai_name:
+                message_obj["name"] = openai_name
+            openai_messages.append(message_obj)
         
         # 4. 调用OpenAI API
         response = client.chat.completions.create(
@@ -178,7 +202,13 @@ def doubao_chat_node(state: ChatState) -> ChatState:
             # 转换langchain消息到豆包兼容格式
             msg_role = msg.role if hasattr(msg, "role") else "user"
             msg_content = msg.content if hasattr(msg, "content") else str(msg)
-            doubao_messages.append({"role": msg_role, "content": msg_content})
+            # 检查是否有name字段
+            msg_name = msg.name if hasattr(msg, "name") else state.get("name")
+            # 构建消息对象
+            message_obj = {"role": msg_role, "content": msg_content}
+            if msg_name:
+                message_obj["name"] = msg_name
+            doubao_messages.append(message_obj)
         
         # 4. 调用豆包API
         response = client.chat.completions.create(

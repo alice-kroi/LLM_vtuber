@@ -1,0 +1,770 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LangGraph 状态结构",
+  "description": "用于定义和管理 LangGraph 框架中的状态结构",
+  "type": "object",
+  "properties": {
+    "core_state": {
+      "title": "核心状态模块",
+      "description": "包含系统运行和用户交互的基础信息",
+      "type": "object",
+      "properties": {
+        "messages_id": {
+          "title": "对话ID",
+          "description": "对话的唯一标识符",
+          "type": "string",
+          "format": "uuid"
+        },
+        "messages_title": {
+          "title": "对话标题",
+          "description": "对话的标题",
+          "type": "string"
+        },
+        "messages_description": {
+          "title": "对话描述",
+          "description": "对话的描述信息",
+          "type": "string"
+        },
+        "messages_state": {
+          "title": "对话状态",
+          "description": "当前对话的状态",
+          "type": "string",
+          "enum": ["active", "completed", "cancelled", "error"]
+        },
+        "messages": {
+          "title": "聊天记录数据",
+          "description": "对话中的所有消息",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "message_id": {
+                "title": "消息ID",
+                "description": "消息的唯一标识符",
+                "type": "string",
+                "format": "uuid"
+              },
+              "role": {
+                "title": "角色",
+                "description": "消息发送者的角色",
+                "type": "string",
+                "enum": ["user", "assistant", "system", "tool"]
+              },
+              "content": {
+                "title": "内容",
+                "description": "消息的具体内容",
+                "type": "string"
+              },
+              "timestamp": {
+                "title": "时间戳",
+                "description": "消息的创建时间",
+                "type": "string",
+                "format": "date-time"
+              },
+              "vector": {
+                "title": "向量表示",
+                "description": "消息内容的向量表示，用于相似度搜索和语义分析",
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "metadata": {
+                "title": "元数据",
+                "description": "消息的附加信息，可包含 message_state 相关数据",
+                "type": "object",
+                "properties": {
+                  "message_state": {
+                    "title": "对话状态",
+                    "description": "当前消息对应的对话状态",
+                    "type": "string",
+                    "enum": ["active", "completed", "cancelled", "error"]
+                  },
+                  "message_title": {
+                    "title": "对话标题",
+                    "description": "当前消息对应的对话标题",
+                    "type": "string"
+                  },
+                  "message_description": {
+                    "title": "对话描述",
+                    "description": "当前消息对应的对话描述",
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              },
+              "status": {
+                "title": "消息状态",
+                "description": "消息的处理状态",
+                "type": "string",
+                "enum": ["sent", "received", "processing", "processed", "error"]
+              }
+            },
+            "required": ["message_id", "role", "content", "timestamp"]
+          }
+        },
+        "user_info": {
+          "title": "用户信息",
+          "description": "对话相关的用户信息",
+          "type": "object",
+          "properties": {
+            "user_id": {
+              "title": "用户ID",
+              "description": "用户的唯一标识符",
+              "type": "string",
+              "format": "uuid"
+            },
+            "username": {
+              "title": "用户名",
+              "description": "用户的名称",
+              "type": "string"
+            },
+            "preferences": {
+              "title": "用户偏好",
+              "description": "用户的对话偏好设置",
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "required": ["user_id"]
+        },
+        "context_info": {
+          "title": "上下文信息",
+          "description": "对话的上下文信息",
+          "type": "object",
+          "properties": {
+            "context_id": {
+            "title": "上下文ID",
+            "description": "上下文的唯一标识符",
+            "type": "string",
+            "format": "uuid"
+          }
+          }
+        },
+        "timestamps": {
+          "title": "时间戳信息",
+          "description": "对话的时间戳信息",
+          "type": "object",
+          "properties": {
+            "created_at": {
+              "title": "创建时间",
+              "description": "对话的创建时间",
+              "type": "string",
+              "format": "date-time"
+            },
+            "last_message_at": {
+              "title": "最新一次对话时间",
+              "description": "最后一条消息的时间",
+              "type": "string",
+              "format": "date-time"
+            },
+            "last_updated": {
+              "title": "最后更新时间",
+              "description": "对话状态的最后更新时间",
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": ["created_at", "last_message_at"]
+        },
+        "metrics": {
+          "title": "对话指标",
+          "description": "对话的统计指标",
+          "type": "object",
+          "properties": {
+            "message_count": {
+              "title": "聊天记录长度",
+              "description": "对话中的消息数量",
+              "type": "integer",
+              "minimum": 0
+            },
+            "user_message_count": {
+              "title": "用户消息数量",
+              "description": "用户发送的消息数量",
+              "type": "integer",
+              "minimum": 0
+            },
+            "assistant_message_count": {
+              "title": "助手消息数量",
+              "description": "助手发送的消息数量",
+              "type": "integer",
+              "minimum": 0
+            },
+            "total_tokens": {
+              "title": "总 tokens",
+              "description": "对话中使用的总 tokens 数",
+              "type": "integer",
+              "minimum": 0
+            },
+            "average_response_time": {
+              "title": "平均响应时间",
+              "description": "助手的平均响应时间（秒）",
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "required": ["message_count"]
+        },
+        "error_info": {
+          "title": "错误信息",
+          "description": "对话中的错误信息",
+          "type": "object",
+          "properties": {
+            "error_code": {
+              "title": "错误代码",
+              "description": "错误的代码",
+              "type": ["string", "null"]
+            },
+            "error_message": {
+              "title": "错误消息",
+              "description": "错误的详细消息",
+              "type": ["string", "null"]
+            },
+            "error_timestamp": {
+              "title": "错误时间",
+              "description": "错误发生的时间",
+              "type": ["string", "null"],
+              "format": "date-time"
+            },
+            "recovery_status": {
+              "title": "恢复状态",
+              "description": "错误的恢复状态",
+              "type": "string",
+              "enum": ["pending", "recovered", "failed"],
+              "default": "pending"
+            }
+          }
+        },
+        "metadata": {
+          "title": "元数据",
+          "description": "对话的附加元数据",
+          "type": "object",
+          "properties": {
+            "version": {
+              "title": "版本",
+              "description": "对话数据的版本",
+              "type": "string",
+              "pattern": "^\\d+\\.\\d+\\.\\d+$",
+              "default": "1.0.0"
+            },
+            "schema_version": {
+              "title": " schema 版本",
+              "description": "对话数据结构的版本",
+              "type": "string",
+              "pattern": "^\\d+\\.\\d+\\.\\d+$",
+              "default": "1.0.0"
+            },
+            "tags": {
+              "title": "标签",
+              "description": "对话的标签",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "custom_fields": {
+              "title": "自定义字段",
+              "description": "自定义的附加字段",
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "required": ["messages_id", "messages", "timestamps", "metrics"]
+    },
+    "sub_function_state": {
+      "title": "子功能状态模块",
+      "description": "存储各类工具和功能的状态数据",
+      "type": "object",
+      "properties": {
+        "live2d_state": {
+          "title": "Live2D 状态",
+          "description": "Live2D 模型的控制状态",
+          "type": "object",
+          "properties": {
+            "function_id": {
+              "title": "功能标识",
+              "description": "Live2D 控制功能的唯一标识",
+              "type": "string",
+              "const": "live2d_state"
+            },
+            "state": {
+              "title": "状态",
+              "description": "Live2D 控制的状态",
+              "type": "string",
+              "enum": ["active", "inactive", "error"]
+            },
+            "state_data": {
+              "title": "状态数据",
+              "description": "Live2D 控制的具体状态数据",
+              "type": "object",
+              "properties": {
+                "model_id": {
+                  "title": "模型ID",
+                  "description": "当前使用的 Live2D 模型ID",
+                  "type": "string"
+                },
+                "animation_params": {
+                  "title": "动作参数",
+                  "description": "Live2D 模型的动作参数",
+                  "type": "object",
+                  "properties": {
+                    "face_angle_x": {
+                      "title": "面部角度 X",
+                      "description": "面部的 X 轴角度",
+                      "type": "number",
+                      "minimum": -90,
+                      "maximum": 90
+                    },
+                    "face_angle_y": {
+                      "title": "面部角度 Y",
+                      "description": "面部的 Y 轴角度",
+                      "type": "number",
+                      "minimum": -90,
+                      "maximum": 90
+                    },
+                    "face_angle_z": {
+                      "title": "面部角度 Z",
+                      "description": "面部的 Z 轴角度",
+                      "type": "number",
+                      "minimum": -90,
+                      "maximum": 90
+                    },
+                    "eye_open_left": {
+                      "title": "左眼睁开程度",
+                      "description": "左眼的睁开程度",
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "eye_open_right": {
+                      "title": "右眼睁开程度",
+                      "description": "右眼的睁开程度",
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "mouth_open": {
+                      "title": "嘴巴张开程度",
+                      "description": "嘴巴的张开程度",
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "current_animation": {
+                      "title": "当前动画",
+                      "description": "当前正在播放的动画",
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": true
+                },
+                "render_state": {
+                  "title": "渲染状态",
+                  "description": "Live2D 模型的渲染状态",
+                  "type": "object",
+                  "properties": {
+                    "is_rendering": {
+                      "title": "是否正在渲染",
+                      "description": "Live2D 模型是否正在渲染",
+                      "type": "boolean"
+                    },
+                    "render_fps": {
+                      "title": "渲染帧率",
+                      "description": "Live2D 模型的渲染帧率",
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 60
+                    },
+                    "last_render_time": {
+                      "title": "最后渲染时间",
+                      "description": "Live2D 模型的最后渲染时间",
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              },
+              "additionalProperties": true
+            },
+            "last_updated": {
+              "title": "最后更新时间",
+              "description": "Live2D 控制状态的最后更新时间",
+              "type": "string",
+              "format": "date-time"
+            },
+            "is_valid": {
+              "title": "状态有效性标志",
+              "description": "Live2D 控制状态是否有效",
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "required": ["function_id", "state", "last_updated", "is_valid"]
+        },
+        "tts_state": {
+          "title": "TTS 状态",
+          "description": "文本转语音功能的状态",
+          "type": "object",
+          "properties": {
+            "function_id": {
+              "title": "功能标识",
+              "description": "TTS 功能的唯一标识",
+              "type": "string",
+              "const": "tts_state"
+            },
+            "state": {
+              "title": "状态",
+              "description": "TTS 功能的状态",
+              "type": "string",
+              "enum": ["active", "inactive", "error"]
+            },
+            "state_data": {
+              "title": "状态数据",
+              "description": "TTS 功能的具体状态数据",
+              "type": "object",
+              "properties": {
+                "voice_id": {
+                  "title": "语音ID",
+                  "description": "当前使用的语音ID",
+                  "type": "string"
+                },
+                "speed": {
+                  "title": "语速",
+                  "description": "语音的语速",
+                  "type": "number",
+                  "minimum": 0.1,
+                  "maximum": 3.0
+                },
+                "pitch": {
+                  "title": "音调",
+                  "description": "语音的音调",
+                  "type": "number",
+                  "minimum": 0.1,
+                  "maximum": 3.0
+                },
+                "volume": {
+                  "title": "音量",
+                  "description": "语音的音量",
+                  "type": "number",
+                  "minimum": 0.0,
+                  "maximum": 1.0
+                },
+                "last_synthesis": {
+                  "title": "最后合成时间",
+                  "description": "最后一次语音合成的时间",
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "additionalProperties": true
+            },
+            "last_updated": {
+              "title": "最后更新时间",
+              "description": "TTS 状态的最后更新时间",
+              "type": "string",
+              "format": "date-time"
+            },
+            "is_valid": {
+              "title": "状态有效性标志",
+              "description": "TTS 状态是否有效",
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "required": ["function_id", "state", "last_updated", "is_valid"]
+        },
+        "custom_functions": {
+          "title": "自定义功能状态",
+          "description": "预留的自定义功能状态",
+          "type": "object",
+          "additionalProperties": {
+            "title": "自定义功能状态",
+            "description": "自定义功能的状态数据",
+            "type": "object",
+            "properties": {
+              "function_id": {
+                "title": "功能标识",
+                "description": "自定义功能的唯一标识",
+                "type": "string"
+              },
+              "state": {
+                "title": "状态",
+                "description": "自定义功能的状态",
+                "type": "string"
+              },
+              "state_data": {
+                "title": "状态数据",
+                "description": "自定义功能的具体状态数据",
+                "type": "object",
+                "additionalProperties": true
+              },
+              "last_updated": {
+                "title": "最后更新时间",
+                "description": "自定义功能状态的最后更新时间",
+                "type": "string",
+                "format": "date-time"
+              },
+              "is_valid": {
+                "title": "状态有效性标志",
+                "description": "自定义功能状态是否有效",
+                "type": "boolean",
+                "default": true
+              }
+            },
+            "required": ["function_id", "state", "last_updated", "is_valid"]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "state_metadata": {
+      "title": "状态元信息模块",
+      "description": "包含状态管理的辅助信息",
+      "type": "object",
+      "properties": {
+        "version": {
+          "title": "状态版本号",
+          "description": "状态结构的版本号",
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "default": "1.0.0"
+        },
+        "schema_version": {
+          "title": "结构定义版本",
+          "description": "状态结构定义的版本号",
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "default": "1.0.0"
+        },
+        "created_at": {
+          "title": "状态创建时间",
+          "description": "状态的创建时间",
+          "type": "string",
+          "format": "date-time"
+        },
+        "last_modified": {
+          "title": "最后修改时间",
+          "description": "状态的最后修改时间",
+          "type": "string",
+          "format": "date-time"
+        },
+        "state_size": {
+          "title": "状态大小",
+          "description": "状态的大小（字节）",
+          "type": "integer",
+          "minimum": 0
+        },
+        "storage_info": {
+          "title": "存储优化信息",
+          "description": "状态的存储优化信息",
+          "type": "object",
+          "properties": {
+            "compression": {
+              "title": "压缩状态",
+              "description": "状态是否被压缩",
+              "type": "boolean",
+              "default": false
+            },
+            "compression_ratio": {
+              "title": "压缩比率",
+              "description": "状态的压缩比率",
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "default": 0
+            },
+            "storage_location": {
+              "title": "存储位置",
+              "description": "状态的存储位置",
+              "type": "string",
+              "enum": ["memory", "disk", "database"],
+              "default": "memory"
+            }
+          },
+          "additionalProperties": true
+        },
+        "integrity": {
+          "title": "完整性验证机制",
+          "description": "状态的完整性验证信息",
+          "type": "object",
+          "properties": {
+            "checksum": {
+              "title": "状态校验和",
+              "description": "状态的校验和",
+              "type": "string"
+            },
+            "checksum_algorithm": {
+              "title": "校验和算法",
+              "description": "使用的校验和算法",
+              "type": "string",
+              "enum": ["md5", "sha1", "sha256"],
+              "default": "sha256"
+            },
+            "is_valid": {
+              "title": "完整性验证结果",
+              "description": "状态的完整性验证结果",
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "additionalProperties": true
+        },
+        "tags": {
+          "title": "标签",
+          "description": "状态的标签",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["version", "schema_version", "created_at", "last_modified", "state_size", "integrity"]
+    }
+  },
+  "required": ["core_state", "sub_function_state", "state_metadata"]
+}
+
+// 示例数据
+{
+  "core_state": {
+    "messages_id": "123e4567-e89b-12d3-a456-426614174000",
+    "messages_title": "直播弹幕分析",
+    "messages_description": "分析直播弹幕内容并生成响应",
+    "messages_state": "active",
+    "messages": [
+      {
+        "message_id": "123e4567-e89b-12d3-a456-426614174001",
+        "role": "user",
+        "content": "你好",
+        "timestamp": "2026-02-27T10:00:00Z",
+        "metadata": {
+          "message_state": "active",
+          "message_title": "直播弹幕分析",
+          "message_description": "分析直播弹幕内容并生成响应"
+        },
+        "status": "processed"
+      },
+      {
+        "message_id": "123e4567-e89b-12d3-a456-426614174002",
+        "role": "assistant",
+        "content": "你好！有什么我可以帮助你的吗？",
+        "timestamp": "2026-02-27T10:00:15Z",
+        "metadata": {
+          "message_state": "active",
+          "message_title": "直播弹幕分析",
+          "message_description": "分析直播弹幕内容并生成响应"
+        },
+        "status": "processed"
+      }
+    ],
+    "user_info": {
+      "user_id": "123e4567-e89b-12d3-a456-426614174003",
+      "username": "test_user"
+    },
+    "context_info": {
+      "context_id": "123e4567-e89b-12d3-a456-426614174004"
+    },
+    "timestamps": {
+      "created_at": "2026-02-27T10:00:00Z",
+      "last_message_at": "2026-02-27T10:00:15Z",
+      "last_updated": "2026-02-27T10:00:15Z"
+    },
+    "metrics": {
+      "message_count": 2,
+      "user_message_count": 1,
+      "assistant_message_count": 1,
+      "total_tokens": 50,
+      "average_response_time": 15.0
+    },
+    "error_info": {
+      "error_code": null,
+      "error_message": null,
+      "error_timestamp": null,
+      "recovery_status": "pending"
+    },
+    "metadata": {
+      "version": "1.0.0",
+      "schema_version": "1.0.0",
+      "tags": ["live_stream", "danmaku_analysis"],
+      "custom_fields": {}
+    }
+  },
+  "sub_function_state": {
+    "live2d_state": {
+      "function_id": "live2d_state",
+      "state": "active",
+      "state_data": {
+        "model_id": "model_001",
+        "animation_params": {
+          "face_angle_x": 0,
+          "face_angle_y": 5,
+          "face_angle_z": 0,
+          "eye_open_left": 1,
+          "eye_open_right": 1,
+          "mouth_open": 0.3,
+          "current_animation": "idle"
+        },
+        "render_state": {
+          "is_rendering": true,
+          "render_fps": 30,
+          "last_render_time": "2026-02-27T10:00:15Z"
+        }
+      },
+      "last_updated": "2026-02-27T10:00:15Z",
+      "is_valid": true
+    },
+    "tts_state": {
+      "function_id": "tts_state",
+      "state": "active",
+      "state_data": {
+        "voice_id": "voice_001",
+        "speed": 1.0,
+        "pitch": 1.0,
+        "volume": 0.8,
+        "last_synthesis": "2026-02-27T10:00:15Z"
+      },
+      "last_updated": "2026-02-27T10:00:15Z",
+      "is_valid": true
+    },
+    "bilibili_state": {
+      "function_id": "bilibili_state",
+      "state": "active",
+      "state_data": {
+        "room_id": 27241419,
+        "sessdata": "40eb5d4c%2C1787626965%2C7726b%2A22CjAeA8-ffZjV3uvN2SXZ-MhXPgF4FSSlusZ0963YKKdU3zenhSrNT2B3Ud7XjolGRBISVmZ1QjBSTWJyOXFvckd2akU3R0RtTGpWUmtPMkw3VUdvc1dMX2NFMnV5dzlTeUZ1S1RIa2FoLVhKdl9lbWRvRmJ2MktHR3JKeTJXTHU5YTZmalJaRFpRIIEC",
+        "danmakus": [],
+        "gifts": [],
+        "super_chats": [],
+        "total_danmakus": 0,
+        "total_gifts": 0,
+        "total_super_chats": 0,
+        "last_danmaku_time": "",
+        "last_gift_time": "",
+        "last_super_chat_time": ""
+      },
+      "last_updated": "2026-02-27T10:00:15Z",
+      "is_valid": true
+    },
+    "custom_functions": {}
+  },
+  "state_metadata": {
+    "version": "1.0.0",
+    "schema_version": "1.0.0",
+    "created_at": "2026-02-27T10:00:00Z",
+    "last_modified": "2026-02-27T10:00:15Z",
+    "state_size": 1024,
+    "storage_info": {
+      "compression": false,
+      "compression_ratio": 0,
+      "storage_location": "memory"
+    },
+    "integrity": {
+      "checksum": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "checksum_algorithm": "sha256",
+      "is_valid": true
+    },
+    "tags": ["live_stream", "danmaku_analysis"]
+  }
+}

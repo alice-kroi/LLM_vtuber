@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 Milvus数据库管理工具
-功能：检查当前存在的数据库
+功能：检查当前存在的数据库（使用连接复用）
 """
 
 from pymilvus import MilvusClient
 import logging
+from Millvus_base import get_connection_manager
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -49,7 +50,7 @@ def describe_collection(client, collection_name):
 
 def check_collection_content(db_name, collection_name, limit=10):
     """
-    检查指定集合的内容
+    检查指定集合的内容（使用连接复用）
     
     Args:
         db_name: 数据库名称
@@ -63,12 +64,9 @@ def check_collection_content(db_name, collection_name, limit=10):
         Exception: 操作失败时抛出异常
     """
     try:
-        # 初始化Milvus客户端（指定数据库）
-        client = MilvusClient(
-            uri="http://localhost:19530",
-            token="root:Milvus",
-            db_name=db_name
-        )
+        # 使用连接管理器获取Milvus客户端（指定数据库）
+        manager = get_connection_manager(uri="http://localhost:19530", token="root:Milvus", db_name=db_name)
+        client = manager.get_client()
         
         print(f"\n=== 检查集合内容: {db_name}.{collection_name} ===")
         
@@ -122,7 +120,7 @@ def check_collection_content(db_name, collection_name, limit=10):
 
 def list_collections_in_database(db_name):
     """
-    列出指定数据库中的所有集合
+    列出指定数据库中的所有集合（使用连接复用）
     
     Args:
         db_name: 数据库名称
@@ -134,12 +132,9 @@ def list_collections_in_database(db_name):
         Exception: 操作失败时抛出异常
     """
     try:
-        # 初始化Milvus客户端（指定数据库）
-        client = MilvusClient(
-            uri="http://localhost:19530",
-            token="root:Milvus",
-            db_name=db_name
-        )
+        # 使用连接管理器获取Milvus客户端（指定数据库）
+        manager = get_connection_manager(uri="http://localhost:19530", token="root:Milvus", db_name=db_name)
+        client = manager.get_client()
         
         # 列出所有集合
         collections = client.list_collections()
@@ -168,7 +163,7 @@ def list_collections_in_database(db_name):
 
 def list_databases():
     """
-    列出所有存在的数据库及其包含的集合
+    列出所有存在的数据库及其包含的集合（使用连接复用）
     
     Returns:
         dict: 数据库名称到集合列表的映射
@@ -177,11 +172,9 @@ def list_databases():
         Exception: 操作失败时抛出异常
     """
     try:
-        # 初始化Milvus客户端
-        client = MilvusClient(
-            uri="http://localhost:19530",
-            token="root:Milvus"
-        )
+        # 使用连接管理器获取Milvus客户端
+        manager = get_connection_manager(uri="http://localhost:19530", token="root:Milvus", db_name="default")
+        client = manager.get_client()
         
         logger.info("成功连接到Milvus服务")
         

@@ -1,0 +1,123 @@
+{
+  "input": {
+    "query_text": "大语言模型的未来发展趋势是什么？",
+    "collection_name": "chat_history",
+    "db_name": "LLM_vtuber",
+    "query_params": {
+      "top_k": 10,
+      "metric_type": "COSINE",
+      "nprobe": 10
+    }
+  },
+  "results": {
+    "query": "大语言模型的未来发展趋势是什么？",
+    "retrieved_count": 10,
+    "documents": [
+      {
+        "session_id": "session_6",
+        "role_id": "user",
+        "user_id": "user_12",
+        "content": "大语言模型的最新发展是什么？",
+        "timestamp": "2026-03-27T23:02:19.818087Z",
+        "message_type": "user_message",
+        "context_relevance": 0.778006374835968,
+        "similarity": 0.9735647439956665
+      },
+      {
+        "session_id": "session_3",
+        "role_id": "user",
+        "user_id": "user_19",
+        "content": "大语言模型的最新发展是什么？",
+        "timestamp": "2026-03-27T23:02:19.817587Z",
+        "message_type": "user_message",
+        "context_relevance": 0.810276448726654,
+        "similarity": 0.9734740853309631
+      },
+      {
+        "session_id": "session_0",
+        "role_id": "user",
+        "user_id": "user_11",
+        "content": "大语言模型的最新发展是什么？",
+        "timestamp": "2026-03-27T23:02:19.817587Z",
+        "message_type": "user_message",
+        "context_relevance": 0.8298376798629761,
+        "similarity": 0.9734458327293396
+      },
+      {
+        "session_id": "session_5",
+        "role_id": "user",
+        "user_id": "user_13",
+        "content": "大语言模型有什么作用？",
+        "timestamp": "2026-03-27T23:02:19.818087Z",
+        "message_type": "user_message",
+        "context_relevance": 0.9736922979354858,
+        "similarity": 0.957314133644104
+      },
+      {
+        "session_id": "session_2",
+        "role_id": "user",
+        "user_id": "user_17",
+        "content": "大语言模型的优缺点是什么？",
+        "timestamp": "2026-03-27T23:02:19.817587Z",
+        "message_type": "user_message",
+        "context_relevance": 0.818950891494751,
+        "similarity": 0.956566333770752
+      },
+      {
+        "session_id": "session_8",
+        "role_id": "user",
+        "user_id": "user_7",
+        "content": "大语言模型的优缺点是什么？",
+        "timestamp": "2026-03-27T23:02:19.817587Z",
+        "message_type": "user_message",
+        "context_relevance": 0.9537982940673828,
+        "similarity": 0.9565533995628357
+      },
+      {
+        "session_id": "session_2",
+        "role_id": "user",
+        "user_id": "user_3",
+        "content": "大语言模型的常见问题有哪些？",
+        "timestamp": "2026-03-27T23:02:19.818087Z",
+        "message_type": "user_message",
+        "context_relevance": 0.8548957705497742,
+        "similarity": 0.9483908414840698
+      },
+      {
+        "session_id": "session_8",
+        "role_id": "user",
+        "user_id": "user_18",
+        "content": "什么是大语言模型？",
+        "timestamp": "2026-03-27T23:02:19.818087Z",
+        "message_type": "user_message",
+        "context_relevance": 0.8817017674446106,
+        "similarity": 0.9437950849533081
+      },
+      {
+        "session_id": "session_3",
+        "role_id": "assistant",
+        "user_id": "user_19",
+        "content": "关于大语言模型，在未来将发挥更大作用。参与社区讨论来更好地理解和应用它。",
+        "timestamp": "2026-03-27T23:02:19.817587Z",
+        "message_type": "assistant_message",
+        "context_relevance": 0.8075670599937439,
+        "similarity": 0.9401130676269531
+      },
+      {
+        "session_id": "session_0",
+        "role_id": "user",
+        "user_id": "user_6",
+        "content": "如何学习大语言模型？",
+        "timestamp": "2026-03-27T23:02:19.818087Z",
+        "message_type": "user_message",
+        "context_relevance": 0.7035521268844604,
+        "similarity": 0.9394282698631287
+      }
+    ],
+    "summary": "成功检索到 10 条与'大语言模型的未来发展趋势是什么？'相关的文档",
+    "timestamp": "2026-04-12T09:55:22.137137"
+  },
+  "error": null,
+  "execution_time": 0.31873250007629395,
+  "timestamp": "2026-04-12T09:55:22.137679"
+}

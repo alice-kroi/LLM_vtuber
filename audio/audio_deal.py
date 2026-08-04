@@ -33,6 +33,14 @@ except ImportError:
     print("警告: mutagen库未安装，元数据提取功能可能不可用")
     File = None
 
+try:
+    import sounddevice as sd
+    import numpy as np
+except ImportError:
+    print("警告: sounddevice或numpy库未安装，音频虚拟输入功能可能不可用")
+    sd = None
+    np = None
+
 
 def verify_audio_file(file_path: str) -> Dict[str, Any]:
     """
@@ -386,3 +394,394 @@ if __name__ == "__main__":
         print(play_result)
     else:
         print(f"\n无法继续处理，因为文件不存在: {audio_path}")
+
+
+def audio_as_microphone(file_path: str, output_device: Optional[int] = None) -> Dict[str, Any]:
+    """
+    函数4：将音频文件作为计算机麦克风的输入
+    
+    Args:
+        file_path: 音频文件的路径
+        output_device: 输出设备编号，None表示使用默认设备
+    
+    Returns:
+        Dict[str, Any]: 包含操作结果的字典
+            - success: bool, 操作是否成功
+            - error: str, 错误信息（如果有）
+            - duration: float, 音频时长（秒）
+            - output_device: int, 使用的输出设备编号
+    """
+    # 首先验证文件
+    verify_result = verify_audio_file(file_path)
+    if not verify_result["exists"]:
+        return {
+            "success": False,
+            "error": verify_result["error"]
+        }
+    
+    if AudioSegment is None:
+        return {
+            "success": False,
+            "error": "pydub库未安装，无法处理音频"
+        }
+    
+    if sd is None or np is None:
+        return {
+            "success": False,
+            "error": "sounddevice或numpy库未安装，无法模拟麦克风输入"
+        }
+    
+    result = {
+        "success": False,
+        "error": None,
+        "duration": 0.0,
+        "output_device": output_device
+    }
+    
+    try:
+        # 加载音频文件
+        print(f"正在加载音频文件: {verify_result['file_name']}")
+        audio = AudioSegment.from_file(file_path)
+        
+        # 转换为适合sounddevice的格式
+        sample_rate = audio.frame_rate
+        channels = audio.channels
+        
+        # 将音频数据转换为numpy数组
+        samples = np.array(audio.get_array_of_samples())
+        
+        # 归一化到[-1, 1]范围
+        if audio.sample_width == 2:
+            samples = samples.astype(np.float32) / 32768.0
+        elif audio.sample_width == 4:
+            samples = samples.astype(np.float32) / 2147483648.0
+        
+        # 如果是立体声，转换为单声道
+        if channels == 2:
+            samples = np.mean(samples.reshape(-1, 2), axis=1)
+        
+        duration = len(audio) / 1000.0
+        result["duration"] = duration
+        
+        # 获取输出设备信息
+        if output_device is None:
+            output_device = sd.default.device[1]
+            device_info = "默认设备"
+        else:
+            try:
+                device_info = sd.query_devices(output_device)['name']
+            except Exception:
+                device_info = f"设备 {output_device}"
+        
+        result["output_device"] = output_device
+        
+        print(f"音频文件加载完成，时长: {format_duration(duration)}")
+        print(f"采样率: {sample_rate} Hz")
+        print(f"输出设备: [{output_device}] {device_info}")
+        print("开始将音频作为麦克风输入...")
+        
+        # 播放音频到指定输出设备（模拟麦克风输入）
+        # 注意：这实际上是播放音频，而不是真正的麦克风输入
+        # 要实现真正的虚拟麦克风输入，需要使用虚拟音频设备
+        sd.play(samples, samplerate=sample_rate, device=output_device)
+        
+        # 等待播放完成
+        sd.wait()
+        
+        print("音频播放完成，已作为麦克风输入")
+        result["success"] = True
+        
+    except Exception as e:
+        result["error"] = str(e)
+    
+    return result
+
+
+def get_audio_input_devices() -> Dict[str, Any]:
+    """
+    函数5：获取本地设备的声音输入设备列表
+    
+    Returns:
+        Dict[str, Any]: 包含输入设备列表的字典
+            - success: bool, 操作是否成功
+            - devices: dict, 设备编号到设备名称的映射
+            - default_device: int, 默认输入设备编号（如果有）
+            - error: str, 错误信息（如果有）
+    """
+    if sd is None:
+        return {
+            "success": False,
+            "error": "sounddevice库未安装，无法获取设备列表"
+        }
+    
+    result = {
+        "success": False,
+        "devices": {},
+        "default_device": None,
+        "error": None
+    }
+    
+    try:
+        # 获取所有音频设备
+        devices = sd.query_devices()
+        
+        # 筛选输入设备
+        input_devices = {}
+        default_input = sd.default.device[0]
+        
+        for i, device in enumerate(devices):
+            if device['max_input_channels'] > 0:
+                input_devices[i] = device['name']
+        
+        result["devices"] = input_devices
+        result["default_device"] = default_input
+        result["success"] = True
+        
+    except Exception as e:
+        result["error"] = str(e)
+    
+    return result
+
+
+def get_audio_output_devices() -> Dict[str, Any]:
+    """
+    函数6：获取本地设备的声音输出设备列表
+    
+    Returns:
+        Dict[str, Any]: 包含输出设备列表的字典
+            - success: bool, 操作是否成功
+            - devices: dict, 设备编号到设备名称的映射
+            - default_device: int, 默认输出设备编号（如果有）
+            - error: str, 错误信息（如果有）
+    """
+    if sd is None:
+        return {
+            "success": False,
+            "error": "sounddevice库未安装，无法获取设备列表"
+        }
+    
+    result = {
+        "success": False,
+        "devices": {},
+        "default_device": None,
+        "error": None
+    }
+    
+    try:
+        devices = sd.query_devices()
+        
+        output_devices = {}
+        default_output = sd.default.device[1]
+        
+        for i, device in enumerate(devices):
+            if device['max_output_channels'] > 0:
+                output_devices[i] = device['name']
+        
+        result["devices"] = output_devices
+        result["default_device"] = default_output
+        result["success"] = True
+        
+    except Exception as e:
+        result["error"] = str(e)
+    
+    return result
+
+
+def play_audio_stream(audio_data: bytes, output_device: Optional[int] = None) -> Dict[str, Any]:
+    """
+    函数7：直接播放音频流数据（不保存到文件）
+    
+    Args:
+        audio_data: 音频数据（支持 WAV 格式或原始 PCM 数据）
+        output_device: 输出设备编号，None表示使用默认设备
+    
+    Returns:
+        Dict[str, Any]: 包含播放结果的字典
+            - success: bool, 播放是否成功
+            - error: str, 错误信息（如果有）
+            - duration: float, 音频时长（秒）
+            - sample_rate: int, 采样率
+    """
+    result = {
+        "success": False,
+        "error": None,
+        "duration": 0.0,
+        "sample_rate": 32000
+    }
+    
+    if sd is None or np is None:
+        result["error"] = "sounddevice或numpy库未安装，无法播放音频流"
+        return result
+    
+    if not audio_data or len(audio_data) == 0:
+        result["error"] = "音频数据为空"
+        return result
+    
+    try:
+        if audio_data[:4] == b'RIFF' and audio_data[8:12] == b'WAVE':
+            sample_rate = int.from_bytes(audio_data[24:28], 'little')
+            bits_per_sample = int.from_bytes(audio_data[34:36], 'little')
+            num_channels = int.from_bytes(audio_data[22:24], 'little')
+            
+            print(f"解析WAV头: 采样率={sample_rate} Hz, 位深度={bits_per_sample} bit, 声道数={num_channels}")
+            
+            data_start = 12
+            while data_start < len(audio_data) - 8:
+                chunk_id = audio_data[data_start:data_start+4]
+                chunk_size = int.from_bytes(audio_data[data_start+4:data_start+8], 'little')
+                if chunk_id == b'data':
+                    data_start += 8
+                    break
+                data_start += 8 + chunk_size
+            else:
+                result["error"] = "无法找到音频数据块"
+                return result
+            
+            raw_data = audio_data[data_start:]
+            print(f"原始数据大小: {len(raw_data)} bytes")
+            
+            if bits_per_sample == 16:
+                samples = np.frombuffer(raw_data, dtype=np.int16)
+            elif bits_per_sample == 32:
+                samples = np.frombuffer(raw_data, dtype=np.int32)
+            else:
+                print(f"警告: 不支持的位深度 {bits_per_sample}，使用16位")
+                samples = np.frombuffer(raw_data, dtype=np.int16)
+        else:
+            print("警告: 不是标准WAV格式，假设为16位PCM数据")
+            samples = np.frombuffer(audio_data, dtype=np.int16)
+            sample_rate = 32000
+        
+        print(f"采样数: {len(samples)}, 预期时长: {len(samples) / sample_rate:.2f} 秒")
+        
+        samples = samples.astype(np.float32) / 32768.0
+        
+        print(f"归一化后采样数: {len(samples)}")
+        
+        duration = len(samples) / sample_rate
+        result["duration"] = duration
+        result["sample_rate"] = sample_rate
+        
+        if output_device is None:
+            output_device = sd.default.device[1]
+            device_info = "默认设备"
+        else:
+            try:
+                device_info = sd.query_devices(output_device)['name']
+            except Exception:
+                device_info = f"设备 {output_device}"
+        
+        print(f"音频流加载完成，时长: {format_duration(duration)}")
+        print(f"采样率: {sample_rate} Hz")
+        print(f"输出设备: [{output_device}] {device_info}")
+        print("开始播放音频流...")
+        
+        sd.play(samples, samplerate=sample_rate, device=output_device)
+        sd.wait()
+        
+        print("音频流播放完成")
+        result["success"] = True
+        
+    except Exception as e:
+        result["error"] = f"播放音频流异常: {str(e)}"
+    
+    return result
+
+
+def play_audio_stream_chunks(chunks_generator, sample_rate: int = 32000, output_device: Optional[int] = None) -> Dict[str, Any]:
+    """
+    函数8：流式播放音频块（边接收边播放）
+    
+    Args:
+        chunks_generator: 音频块生成器，每块为 bytes 数据
+        sample_rate: 采样率
+        output_device: 输出设备编号，None表示使用默认设备
+    
+    Returns:
+        Dict[str, Any]: 包含播放结果的字典
+            - success: bool, 播放是否成功
+            - error: str, 错误信息（如果有）
+            - total_duration: float, 总音频时长（秒）
+            - chunks_received: int, 接收的块数量
+    """
+    result = {
+        "success": False,
+        "error": None,
+        "total_duration": 0.0,
+        "chunks_received": 0
+    }
+    
+    if sd is None or np is None:
+        result["error"] = "sounddevice或numpy库未安装，无法播放音频流"
+        return result
+    
+    try:
+        all_samples = []
+        
+        for chunk in chunks_generator:
+            if not chunk or len(chunk) == 0:
+                continue
+            
+            result["chunks_received"] += 1
+            
+            if chunk[:4] == b'RIFF':
+                data_start = 12
+                chunk_data = chunk
+                while data_start < len(chunk_data) - 8:
+                    chunk_id = chunk_data[data_start:data_start+4]
+                    chunk_size = int.from_bytes(chunk_data[data_start+4:data_start+8], 'little')
+                    if chunk_id == b'data':
+                        data_start += 8
+                        break
+                    data_start += 8 + chunk_size
+                else:
+                    data_start = 44 if len(chunk_data) > 44 else len(chunk_data)
+                
+                if data_start < len(chunk_data):
+                    samples = np.frombuffer(chunk_data[data_start:], dtype=np.int16)
+                else:
+                    samples = np.array([], dtype=np.int16)
+            else:
+                samples = np.frombuffer(chunk, dtype=np.int16)
+            
+            if len(samples) > 0:
+                all_samples.append(samples)
+        
+        if not all_samples:
+            result["error"] = "未接收到任何有效音频数据"
+            return result
+        
+        combined_samples = np.concatenate(all_samples)
+        combined_samples = combined_samples.astype(np.float32) / 32768.0
+        
+        if len(combined_samples) > 1 and len(combined_samples) % 2 == 0:
+            combined_samples = np.mean(combined_samples.reshape(-1, 2), axis=1)
+        
+        duration = len(combined_samples) / sample_rate
+        result["total_duration"] = duration
+        
+        if output_device is None:
+            output_device = sd.default.device[1]
+            device_info = "默认设备"
+        else:
+            try:
+                device_info = sd.query_devices(output_device)['name']
+            except Exception:
+                device_info = f"设备 {output_device}"
+        
+        print(f"音频流接收完成，总时长: {format_duration(duration)}")
+        print(f"采样率: {sample_rate} Hz")
+        print(f"接收块数: {result['chunks_received']}")
+        print(f"输出设备: [{output_device}] {device_info}")
+        print("开始播放音频...")
+        
+        sd.play(combined_samples, samplerate=sample_rate, device=output_device)
+        sd.wait()
+        
+        print("音频播放完成")
+        result["success"] = True
+        
+    except Exception as e:
+        result["error"] = f"流式播放音频异常: {str(e)}"
+    
+    return result
