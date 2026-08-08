@@ -10,7 +10,9 @@ import argparse
 import sys
 import json
 import asyncio
-from typing import Optional, Dict, Any
+import logging
+from io import BytesIO
+from typing import Optional, Dict, Any, Tuple
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -26,39 +28,112 @@ from audio_deal import (
     get_audio_output_devices
 )
 
+logger = logging.getLogger("audio_main")
+
 args = None
 
 TTS_HOST = "127.0.0.1"
 TTS_PORT = 9880
 REF_AUDIO_PATH = r"D:\Github\【GPT-SoVITS】爱莉希雅V2\参考音频"
+TTS_MAIN_SERVER_URL = f"http://{TTS_HOST}:{TTS_PORT}"
 
 ALLOWED_TONES = {
-    "扮演慌张", "调皮", "尴尬", "感动", "积极", "急了", "假装", 
-    "惊喜", "开心", "撩拨", "难过", "普通", "撒娇", "生气", 
+    "扮演慌张", "调皮", "尴尬", "感动", "积极", "急了", "假装",
+    "惊喜", "开心", "撩拨", "难过", "普通", "撒娇", "生气",
     "严肃", "疑问", "自言"
 }
+
+# BytesIO 始终可用（标准库）
+BytesIO_available = True
 
 try:
     import aiohttp
     aiohttp_available = True
 except ImportError:
-    print("警告: aiohttp库未安装，TTS功能可能不可用")
+    logger.warning("aiohttp库未安装，TTS功能可能不可用")
     aiohttp_available = False
 
-try:
-    from io import BytesIO
-    BytesIO_available = True
-except ImportError:
-    BytesIO_available = False
+
+def clean_text_for_tts(text: str) -> str:
+    """
+    清理 TTS 文本，移除会导致 GPT-SoVITS 合成失败的字符。
+    - 剔除 Unicode 表情符号 (Emoji) 及符号类扩展区
+    - 剔除 Bilibili 自定义表情标签（例如 [妙] [dog]）
+    - 保留中日韩字符、拉丁字母、数字、常见标点、空白
+
+    Args:
+        text: 原始文本
+
+    Returns:
+        清理后的纯文本
+    """
+    if not text:
+        return text
+
+    import re
+
+    # 1. 先剔除 Bilibili 风格的方括号表情标签：[xxx]，允许 2~8 个字符
+    text = re.sub(r"\[[^\[\]]{1,8}\]", "", text)
+
+    result_chars = []
+    for ch in text:
+        code = ord(ch)
+
+        # 保留 ASCII 可打印字符
+        if 0x20 <= code <= 0x7E:
+            result_chars.append(ch)
+            continue
+
+        # 中日韩统一表意文字（简体/繁体）
+        if 0x4E00 <= code <= 0x9FFF:
+            result_chars.append(ch)
+            continue
+
+        # 中文标点符号
+        if 0x3000 <= code <= 0x303F:
+            # 仅保留常用中文标点，跳过特殊符号
+            if ch in "，。！？、：；（）《》""''「」『』—…～·":
+                result_chars.append(ch)
+            continue
+
+        # 全角标点/兼容标点区块
+        if 0xFF00 <= code <= 0xFFEF:
+            result_chars.append(ch)
+            continue
+
+        # 平假名/片假名
+        if 0x3040 <= code <= 0x30FF:
+            result_chars.append(ch)
+            continue
+
+        # 常见拉丁扩展（带重音等）和希腊字母，避免误伤外来词
+        if 0x0080 <= code <= 0x03FF:
+            result_chars.append(ch)
+            continue
+
+        # 韩文音节
+        if 0xAC00 <= code <= 0xD7AF:
+            result_chars.append(ch)
+            continue
+
+        # 其他字符（Emoji 0x1Fxxx、0x26xx、0x27xx、数学符号、装饰符号等）全部丢弃
+
+    cleaned = "".join(result_chars).strip()
+    # 合并多个空白为单个空格
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned
+
 
 def parse_text_with_tone(text: str) -> tuple:
     """
     解析带有语气标记的文本
     语气必须在允许的语气列表中，否则视为无语气标记
-    
+    支持 Live2D 格式 "【语气】文本内容|目光方向|嘴巴状态"，
+    会自动去除 "|目光方向|嘴巴状态" 后缀，只保留纯文本用于 TTS 合成。
+
     Args:
-        text: 格式为"【语气】文本内容"的字符串
-    
+        text: 格式为"【语气】文本内容"或"【语气】文本内容|目光|嘴巴"的字符串
+
     Returns:
         tuple: (语气, 纯文本)
     """
@@ -66,60 +141,113 @@ def parse_text_with_tone(text: str) -> tuple:
         end_idx = text.index("】")
         tone = text[1:end_idx]
         content = text[end_idx+1:].strip()
-        
+        # 去除 Live2D 动作后缀（格式: 内容|目光方向|嘴巴状态）
+        content = content.split("|")[0].strip()
+
         if tone in ALLOWED_TONES:
             return tone, content
         else:
-            print(f"警告: 语气'{tone}'不在允许列表中，将作为普通文本处理")
-            return "", text
-    
+            logger.warning(f"语气'{tone}'不在允许列表中，将作为普通文本处理")
+            return "", content
+
+    # 无语气标记但也可能带 Live2D 后缀，统一去除
+    if "|" in text:
+        return "", text.split("|")[0].strip()
     return "", text
 
+
 def is_valid_tone(tone: str) -> bool:
-    """
-    检查语气是否在允许的列表中
-    
-    Args:
-        tone: 要检查的语气
-    
-    Returns:
-        bool: 是否为有效语气
-    """
+    """检查语气是否在允许的列表中"""
     return tone in ALLOWED_TONES
 
+
 def get_allowed_tones() -> list:
-    """
-    获取所有允许的语气列表
-    
-    Returns:
-        list: 允许的语气列表
-    """
+    """获取所有允许的语气列表"""
     return sorted(list(ALLOWED_TONES))
+
 
 def find_ref_audio_by_tone(tone: str, ref_audio_dir: str = REF_AUDIO_PATH) -> str:
     """
-    根据语气查找参考音频文件
-    
-    Args:
-        tone: 语气标识
-        ref_audio_dir: 参考音频目录
-    
-    Returns:
-        str: 找到的参考音频路径，未找到返回空字符串
+    根据语气查找参考音频文件。
+    为避免子串误匹配（例如"开心"和"开"混淆），要求文件名中包含【tone】。
     """
     if not tone:
         return ""
-    
+
     if not os.path.exists(ref_audio_dir):
-        print(f"警告: 参考音频目录不存在: {ref_audio_dir}")
+        logger.warning(f"参考音频目录不存在: {ref_audio_dir}")
         return ""
-    
+
+    tag = f"【{tone}】"
+    # 优先匹配带【语气】标签的文件
+    for filename in os.listdir(ref_audio_dir):
+        if tag in filename:
+            return os.path.join(ref_audio_dir, filename)
+    # 降级：包含语气关键字
     for filename in os.listdir(ref_audio_dir):
         if tone in filename:
             return os.path.join(ref_audio_dir, filename)
-    
-    print(f"警告: 未找到带有语气'{tone}'的参考音频文件")
+
+    logger.warning(f"未找到带有语气'{tone}'的参考音频文件")
     return ""
+
+
+# --------- WAV 组装工具（共享给 tts_request 和 流式接收 两种模式） ---------
+def _parse_wav_header_from_chunk(chunk: bytes) -> Tuple[int, int, int]:
+    """
+    从WAV头的第一个chunk中解析 sample_rate, bits_per_sample, channels。
+    chunk 必须包含至少44字节且以 RIFF 开头。
+    """
+    sample_rate = int.from_bytes(chunk[24:28], 'little')
+    bits_per_sample = int.from_bytes(chunk[34:36], 'little')
+    channels = int.from_bytes(chunk[22:24], 'little')
+    return sample_rate, bits_per_sample, channels
+
+
+def _extract_pcm_from_chunk(chunk: bytes) -> bytes:
+    """
+    从一个 RIFF 数据块（chunk）中提取纯 PCM 数据。
+    流程：跳过 RIFF+fmt 头，找到 data chunk，提取其内容。
+    chunk 可能不完整地截断 data，因此只提取到当前 chunk 的末尾。
+    """
+    if len(chunk) < 44 or chunk[:4] != b'RIFF':
+        return chunk  # 不是标准头，当纯原始数据用
+
+    try:
+        fmt_chunk_size = int.from_bytes(chunk[16:20], 'little')
+        data_start = 20 + fmt_chunk_size
+        if data_start + 8 <= len(chunk) and chunk[data_start:data_start + 4] == b'data':
+            data_size = int.from_bytes(chunk[data_start + 4:data_start + 8], 'little')
+            data_end = data_start + 8 + data_size
+            if data_end <= len(chunk):
+                return bytes(chunk[data_start + 8:data_end])
+            # data 块超出当前chunk：把剩余全部拿走
+            return bytes(chunk[data_start + 8:])
+        # 找不到标准 data 块：回退：跳过 RIFF(44字节) 头部之后的所有内容
+        return bytes(chunk[44:])
+    except Exception:
+        return bytes(chunk[44:])
+
+
+def _build_wav_from_pcm(pcm: bytes, sample_rate: int, bits_per_sample: int, channels: int) -> bytes:
+    """用标准 WAV 头包装 PCM 裸数据"""
+    if not pcm:
+        return b''
+    header = bytearray()
+    header.extend(b'RIFF')
+    header.extend((len(pcm) + 36).to_bytes(4, 'little'))
+    header.extend(b'WAVEfmt ')
+    header.extend((16).to_bytes(4, 'little'))
+    header.extend((1).to_bytes(2, 'little'))
+    header.extend(channels.to_bytes(2, 'little'))
+    header.extend(sample_rate.to_bytes(4, 'little'))
+    byte_rate = sample_rate * channels * (bits_per_sample // 8)
+    header.extend(byte_rate.to_bytes(4, 'little'))
+    header.extend((channels * (bits_per_sample // 8)).to_bytes(2, 'little'))
+    header.extend(bits_per_sample.to_bytes(2, 'little'))
+    header.extend(b'data')
+    header.extend(len(pcm).to_bytes(4, 'little'))
+    return bytes(header) + pcm
 
 def parse_args():
     """
@@ -313,130 +441,78 @@ async def tts_request(text: str, prompt_text: str = "",
         timeout = aiohttp.ClientTimeout(total=120)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=data) as response:
-                print(f"TTS请求响应状态码: {response.status}")
-                
+                logger.info(f"TTS请求响应状态码: {response.status}")
+
                 content_length = response.headers.get('Content-Length')
                 content_type = response.headers.get('Content-Type')
-                print(f"响应Content-Type: {content_type}")
-                
+                logger.info(f"响应Content-Type: {content_type}")
+
                 if content_length:
                     result["content_length"] = int(content_length)
-                    print(f"预期内容长度: {content_length} bytes")
-                
+
                 if response.status == 200:
-                    raw_audio_data = bytearray()
-                    chunk_size = 8192
-                    total_received = 0
-                    chunk_count = 0
                     sample_rate = 32000
                     bits_per_sample = 16
-                    is_first_chunk = True
-                    
-                    print("开始接收音频数据...")
-                    async for chunk in response.content.iter_chunked(chunk_size):
-                        if chunk:
-                            total_received += len(chunk)
-                            chunk_count += 1
-                            
-                            if len(chunk) >= 44 and chunk[:4] == b'RIFF':
-                                if is_first_chunk:
-                                    sample_rate = int.from_bytes(chunk[24:28], 'little')
-                                    bits_per_sample = int.from_bytes(chunk[34:36], 'little')
-                                    is_first_chunk = False
-                                
-                                fmt_chunk_size = int.from_bytes(chunk[16:20], 'little')
-                                data_start = 20 + fmt_chunk_size
-                                
-                                if data_start + 8 <= len(chunk) and chunk[data_start:data_start+4] == b'data':
-                                    data_size = int.from_bytes(chunk[data_start+4:data_start+8], 'little')
-                                    data_end = data_start + 8 + data_size
-                                    if data_size > 0:
-                                        if data_end <= len(chunk):
-                                            raw_audio_data.extend(chunk[data_start+8:data_end])
-                                        else:
-                                            raw_audio_data.extend(chunk[data_start+8:])
-                                else:
-                                    raw_audio_data.extend(chunk[44:])
-                            else:
-                                raw_audio_data.extend(chunk)
-                            
-                            print(f"已接收: {total_received} bytes ({chunk_count} chunks)", end='\r')
-                    
-                    print()
-                    
-                    if len(raw_audio_data) > 0:
-                        wav_data = bytearray()
-                        wav_data.extend(b'RIFF')
-                        wav_data.extend((len(raw_audio_data) + 36).to_bytes(4, 'little'))
-                        wav_data.extend(b'WAVEfmt ')
-                        wav_data.extend((16).to_bytes(4, 'little'))
-                        wav_data.extend((1).to_bytes(2, 'little'))
-                        wav_data.extend((1).to_bytes(2, 'little'))
-                        wav_data.extend(sample_rate.to_bytes(4, 'little'))
-                        wav_data.extend((sample_rate * bits_per_sample // 8).to_bytes(4, 'little'))
-                        wav_data.extend((bits_per_sample // 8).to_bytes(2, 'little'))
-                        wav_data.extend(bits_per_sample.to_bytes(2, 'little'))
-                        wav_data.extend(b'data')
-                        wav_data.extend(len(raw_audio_data).to_bytes(4, 'little'))
-                        wav_data.extend(raw_audio_data)
-                        
-                        audio_data = bytes(wav_data)
-                        print(f"✓ 流式音频组装完成，原始数据: {len(raw_audio_data)} bytes")
-                    else:
-                        audio_data = bytes()
-                    
+                    channels = 1
+                    raw_pcm = bytearray()
+                    chunk_count = 0
+                    total_received = 0
+
+                    logger.info("开始接收音频数据...")
+                    async for chunk in response.content.iter_chunked(8192):
+                        if not chunk:
+                            continue
+                        chunk_count += 1
+                        total_received += len(chunk)
+
+                        # 首个块：从WAV头解析采样参数
+                        if chunk_count == 1 and len(chunk) >= 44 and chunk[:4] == b'RIFF':
+                            sample_rate, bits_per_sample, channels = _parse_wav_header_from_chunk(chunk)
+                            logger.info(
+                                f"解析WAV头: 采样率={sample_rate}Hz, "
+                                f"位深={bits_per_sample}bit, 声道={channels}"
+                            )
+
+                        # 提取PCM数据（自动跳过RIFF头/各chunk头）
+                        raw_pcm.extend(_extract_pcm_from_chunk(chunk))
+                        if chunk_count % 16 == 0:
+                            logger.debug(f"已接收: {total_received} bytes ({chunk_count} chunks)")
+
+                    # 组装成标准WAV
+                    audio_data = (
+                        _build_wav_from_pcm(bytes(raw_pcm), sample_rate, bits_per_sample, channels)
+                        if raw_pcm else b''
+                    )
                     result["audio_data"] = audio_data
                     result["success"] = True
-                    print(f"TTS请求成功，音频数据大小: {len(audio_data)} bytes")
-                    print(f"共接收 {chunk_count} 个数据块")
-                    
+                    logger.info(
+                        f"TTS请求成功: 原始PCM={len(raw_pcm)} bytes, "
+                        f"WAV={len(audio_data)} bytes, chunks={chunk_count}"
+                    )
+
                     if content_length and int(content_length) != len(audio_data):
-                        print(f"警告: 接收的数据大小({len(audio_data)})与预期({content_length})不一致")
-                    else:
-                        print("✓ 数据完整性验证通过")
-                        
-                    if len(audio_data) > 0:
-                        print(f"音频数据前16字节: {audio_data[:16].hex()}")
-                        if audio_data[:4] == b'RIFF':
-                            print("✓ 检测到WAV文件格式")
-                            
-                            if len(audio_data) >= 44:
-                                riff_size = int.from_bytes(audio_data[4:8], 'little')
-                                fmt_chunk_size = int.from_bytes(audio_data[16:20], 'little')
-                                sample_rate = int.from_bytes(audio_data[24:28], 'little')
-                                bits_per_sample = int.from_bytes(audio_data[34:36], 'little')
-                                data_chunk_size = int.from_bytes(audio_data[40:44], 'little')
-                                
-                                print(f"  RIFF块声明大小: {riff_size + 8} bytes")
-                                print(f"  fmt块大小: {fmt_chunk_size} bytes")
-                                print(f"  采样率: {sample_rate} Hz")
-                                print(f"  位深度: {bits_per_sample} bits")
-                                print(f"  数据块大小: {data_chunk_size} bytes")
-                                print(f"  计算音频时长: {(data_chunk_size * 8) / (sample_rate * bits_per_sample):.2f} 秒")
-                                
-                                expected_total = riff_size + 8
-                                if len(audio_data) == expected_total:
-                                    print("  ✓ WAV文件结构完整")
-                                else:
-                                    print(f"  ⚠️ 警告: WAV文件实际大小({len(audio_data)})与RIFF块声明({expected_total})不一致")
-                            else:
-                                print("  ⚠️ 警告: 音频数据不足44字节，无法解析完整WAV头")
-                        else:
-                            print("⚠️ 警告: 数据开头不是WAV格式(RIFF)")
-                            print(f"  数据开头: {audio_data[:20]}")
+                        logger.warning(
+                            f"数据大小不匹配: 接收={len(audio_data)}, 预期={content_length}"
+                        )
                 else:
                     try:
                         error_info = await response.json()
-                        result["error"] = f"TTS请求失败，HTTP状态码: {response.status}, 错误信息: {json.dumps(error_info, ensure_ascii=False)}"
-                    except:
+                        result["error"] = (
+                            f"TTS请求失败，HTTP状态码: {response.status}, "
+                            f"错误信息: {json.dumps(error_info, ensure_ascii=False)}"
+                        )
+                    except Exception:
                         error_text = await response.text()
-                        result["error"] = f"TTS请求失败，HTTP状态码: {response.status}, 响应内容: {error_text[:500]}"
+                        result["error"] = (
+                            f"TTS请求失败，HTTP状态码: {response.status}, "
+                            f"响应内容: {error_text[:500]}"
+                        )
 
     except Exception as e:
-        result["error"] = f"TTS请求异常: {str(e)}"
         import traceback
-        result["error"] += f"\n{traceback.format_exc()}"
-    
+        result["error"] = f"TTS请求异常: {str(e)}\n{traceback.format_exc()}"
+        logger.error(result["error"])
+
     return result
 
 async def tts_request_and_stream_play(text: str, prompt_text: str = "",
@@ -447,7 +523,7 @@ async def tts_request_and_stream_play(text: str, prompt_text: str = "",
                                       save_path: str = "") -> Dict[str, Any]:
     """
     发送TTS请求并边接收边播放音频流（不保存到文件）
-    
+
     Args:
         text: 要合成的文本
         prompt_text: 提示文本（语气/风格参考）
@@ -457,29 +533,29 @@ async def tts_request_and_stream_play(text: str, prompt_text: str = "",
         speed_factor: 音频速度因子，小于1表示减速，大于1表示加速
         streaming_mode: 流式模式: 0=禁用, 1/2/3=启用
         save_path: 保存音频到文件路径（可选）
-    
+
     Returns:
         Dict[str, Any]: 播放结果
             - success: bool, 操作是否成功
             - error: str, 错误信息（如果失败）
             - audio_duration: float, 音频时长（秒）
     """
-    result = {
+    result: Dict[str, Any] = {
         "success": False,
         "error": None,
         "audio_duration": 0.0
     }
-    
+
     if not aiohttp_available:
         result["error"] = "aiohttp库未安装，无法发送TTS请求"
         return result
-    
+
     if not text:
         result["error"] = "text参数不能为空"
         return result
-    
+
     url = f"http://{host}:{port}/tts"
-    
+
     data = {
         "text": text,
         "text_lang": "zh",
@@ -506,118 +582,86 @@ async def tts_request_and_stream_play(text: str, prompt_text: str = "",
         "min_chunk_length": 16,
         "media_type": "wav"
     }
-    
-    print(f"TTS请求参数: {json.dumps(data, ensure_ascii=False)}")
-    
+
+    logger.info(f"TTS请求参数: {json.dumps(data, ensure_ascii=False)}")
+
     try:
         timeout = aiohttp.ClientTimeout(total=120)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=data) as response:
-                print(f"TTS请求响应状态码: {response.status}")
-                
-                content_type = response.headers.get('Content-Type')
-                print(f"响应Content-Type: {content_type}")
-                
-                if response.status == 200:
-                    print("开始接收音频数据...")
-                    
-                    is_streaming = streaming_mode != 0
-                    
-                    if is_streaming:
-                        print("模式: 流式传输")
-                        sample_rate = 32000
-                        bits_per_sample = 16
-                        channels = 1
-                        is_first_chunk = True
-                        received_wav_header = False
-                        
-                        raw_audio_data = bytearray()
-                        chunk_count = 0
-                        total_received = 0
-                        
-                        async for chunk in response.content.iter_chunked(8192):
-                            if chunk:
-                                chunk_count += 1
-                                total_received += len(chunk)
-                                
-                                if is_first_chunk:
-                                    if len(chunk) >= 44 and chunk[:4] == b'RIFF':
-                                        received_wav_header = True
-                                        sample_rate = int.from_bytes(chunk[24:28], 'little')
-                                        bits_per_sample = int.from_bytes(chunk[34:36], 'little')
-                                        channels = int.from_bytes(chunk[22:24], 'little')
-                                        raw_audio_data.extend(chunk[44:])
-                                        print(f"✓ 第一个块包含WAV头+音频数据，采样率: {sample_rate} Hz, 位深度: {bits_per_sample} bit, 声道数: {channels}")
-                                    else:
-                                        raw_audio_data.extend(chunk)
-                                    is_first_chunk = False
-                                else:
-                                    raw_audio_data.extend(chunk)
-                                
-                                print(f"已接收: {total_received} bytes ({chunk_count} chunks)", end='\r')
-                        
-                        print()
-                        
-                        if len(raw_audio_data) > 0:
-                            if received_wav_header:
-                                audio_len = len(raw_audio_data)
-                                riff_size = audio_len + 36
-                                
-                                full_wav = bytearray()
-                                full_wav.extend(b'RIFF')
-                                full_wav.extend(riff_size.to_bytes(4, 'little'))
-                                full_wav.extend(b'WAVEfmt ')
-                                full_wav.extend((16).to_bytes(4, 'little'))
-                                full_wav.extend((1).to_bytes(2, 'little'))
-                                full_wav.extend(channels.to_bytes(2, 'little'))
-                                full_wav.extend(sample_rate.to_bytes(4, 'little'))
-                                byte_rate = sample_rate * channels * (bits_per_sample // 8)
-                                full_wav.extend(byte_rate.to_bytes(4, 'little'))
-                                full_wav.extend((channels * (bits_per_sample // 8)).to_bytes(2, 'little'))
-                                full_wav.extend(bits_per_sample.to_bytes(2, 'little'))
-                                full_wav.extend(b'data')
-                                full_wav.extend(audio_len.to_bytes(4, 'little'))
-                                full_wav.extend(raw_audio_data)
-                                
-                                audio_to_play = bytes(full_wav)
-                                print(f"✓ 流式数据组装完成，采样率: {sample_rate}, 位深度: {bits_per_sample}, 声道数: {channels}, 音频数据: {len(raw_audio_data)} bytes")
-                            else:
-                                audio_to_play = bytes(raw_audio_data)
-                                print(f"警告: 未接收到WAV头，直接使用原始数据")
-                    else:
-                        print("模式: 非流式传输")
-                        audio_to_play = await response.read()
-                        print(f"✓ 完整音频数据接收完成，大小: {len(audio_to_play)} bytes")
-                    
-                    if len(audio_to_play) > 0:
-                        if save_path:
-                            with open(save_path, "wb") as f:
-                                f.write(audio_to_play)
-                            print(f"✓ 音频已保存到: {save_path}")
-                        
-                        play_result = play_audio_stream(audio_to_play)
-                        
-                        if play_result["success"]:
-                            result["success"] = True
-                            result["audio_duration"] = play_result["duration"]
-                            print(f"✓ 流式TTS音频播放成功，时长: {format_duration(play_result['duration'])}")
-                        else:
-                            result["error"] = f"播放音频流失败: {play_result['error']}"
-                    else:
-                        result["error"] = "未接收到音频数据"
-                else:
+                logger.info(f"TTS流式响应状态码: {response.status}")
+
+                if response.status != 200:
                     try:
                         error_info = await response.json()
-                        result["error"] = f"TTS请求失败，HTTP状态码: {response.status}, 错误信息: {json.dumps(error_info, ensure_ascii=False)}"
-                    except:
+                        result["error"] = (
+                            f"TTS请求失败，HTTP状态码: {response.status}, "
+                            f"错误信息: {json.dumps(error_info, ensure_ascii=False)}"
+                        )
+                    except Exception:
                         error_text = await response.text()
-                        result["error"] = f"TTS请求失败，HTTP状态码: {response.status}, 响应内容: {error_text[:500]}"
+                        result["error"] = (
+                            f"TTS请求失败，HTTP状态码: {response.status}, "
+                            f"响应内容: {error_text[:500]}"
+                        )
+                    return result
+
+                # 非流式：直接拿到完整WAV
+                if streaming_mode == 0:
+                    logger.info("TTS模式: 非流式传输")
+                    audio_to_play = await response.read()
+                    logger.info(f"TTS完整音频: {len(audio_to_play)} bytes")
+                else:
+                    # 流式：拼PCM再组装WAV，复用共享工具函数
+                    logger.info("TTS模式: 流式传输")
+                    sample_rate, bits_per_sample, channels = 32000, 16, 1
+                    raw_pcm = bytearray()
+                    chunk_count = 0
+
+                    async for chunk in response.content.iter_chunked(8192):
+                        if not chunk:
+                            continue
+                        chunk_count += 1
+                        if chunk_count == 1 and len(chunk) >= 44 and chunk[:4] == b'RIFF':
+                            sample_rate, bits_per_sample, channels = _parse_wav_header_from_chunk(chunk)
+                            logger.info(
+                                f"TTS解析WAV头: 采样率={sample_rate}Hz, "
+                                f"位深={bits_per_sample}bit, 声道={channels}"
+                            )
+                        raw_pcm.extend(_extract_pcm_from_chunk(chunk))
+
+                    audio_to_play = (
+                        _build_wav_from_pcm(bytes(raw_pcm), sample_rate, bits_per_sample, channels)
+                        if raw_pcm else b''
+                    )
+                    logger.info(
+                        f"TTS流式组装完成: PCM={len(raw_pcm)} bytes, "
+                        f"WAV={len(audio_to_play)} bytes, chunks={chunk_count}"
+                    )
+
+                if not audio_to_play:
+                    result["error"] = "未接收到音频数据"
+                    return result
+
+                if save_path:
+                    with open(save_path, "wb") as f:
+                        f.write(audio_to_play)
+                    logger.info(f"TTS音频已保存到: {save_path}")
+
+                play_result = play_audio_stream(audio_to_play)
+                if play_result["success"]:
+                    result["success"] = True
+                    result["audio_duration"] = play_result["duration"]
+                    logger.info(f"TTS播放成功，时长: {format_duration(play_result['duration'])}")
+                else:
+                    result["error"] = f"播放音频流失败: {play_result['error']}"
+                    logger.error(result["error"])
 
     except Exception as e:
-        result["error"] = f"TTS请求异常: {str(e)}"
         import traceback
-        result["error"] += f"\n{traceback.format_exc()}"
-    
+        result["error"] = f"TTS请求异常: {str(e)}\n{traceback.format_exc()}"
+        logger.error(result["error"])
+
     return result
 
 async def play_tts_audio(text: str, prompt_text: str = "", 
@@ -687,113 +731,123 @@ async def play_tts_audio(text: str, prompt_text: str = "",
     
     return result
 
-def tts_node(state) -> dict:
+async def tts_node(state) -> dict:
     """
-    LangGraph TTS节点
-    从状态中获取文本和语气，发送TTS请求并直接播放音频流
-    
+    LangGraph TTS节点（异步）
+    从状态中获取文本和语气，发送TTS请求并直接播放音频流。
+    注意：tts_node 由 LangGraph 通过 ainvoke 在已有事件循环中调用，
+         因此必须为 async def，内部直接 await 异步函数，不能用 asyncio.run()。
+
     支持解析格式为"【语气】文本内容"的文本，自动根据语气查找参考音频
-    
+
     Args:
         state: LangGraph状态对象（LLMState或dict），包含以下字段:
             - response: str, 要合成的文本（支持【语气】文本内容格式）
-    
+
     Returns:
         dict: 更新后的状态
     """
-    import logging
-    
-    logger = logging.getLogger("tts_node")
     logger.info("=== 执行 TTS 节点 ===")
-    
+
     try:
         # 获取响应文本
         if isinstance(state, dict):
             text = state.get("response", "")
         else:
             text = getattr(state, "response", "")
-        
-        logger.info(f"TTS节点接收到的文本: {text[:50]}..." if len(text) > 50 else f"TTS节点接收到的文本: {text}")
-        
+
+        if len(text) > 50:
+            logger.info(f"TTS节点接收到的文本: {text[:50]}...")
+        else:
+            logger.info(f"TTS节点接收到的文本: {text}")
+
         if not text:
             logger.warning("未找到要合成的文本，跳过TTS处理")
             return dict(state) if isinstance(state, dict) else state
-        
+
         tone, content = parse_text_with_tone(text)
+
+        # 剔除 Emoji 和 Bilibili 表情标签，防止 GPT-SoVITS 合成报错
+        # （例如 "嘿嘿～是不是坐着的样子看起来小小的超可爱呀😘" → "嘿嘿～是不是坐着的样子看起来小小的超可爱呀"）
+        cleaned_content = clean_text_for_tts(content)
+        if cleaned_content != content:
+            removed_len = len(content) - len(cleaned_content)
+            logger.info(f"TTS文本清洗: 移除了 {removed_len} 个字符 (表情/符号)")
+            content = cleaned_content
+
+        if not content:
+            logger.warning("清洗后文本为空，跳过TTS处理")
+            return dict(state) if isinstance(state, dict) else state
+
         prompt_text = ""
         ref_audio_path = ""
-        
+
         if tone:
             found_audio = find_ref_audio_by_tone(tone)
             if found_audio:
                 ref_audio_path = found_audio
                 logger.info(f"根据语气'{tone}'找到参考音频: {os.path.basename(found_audio)}")
-                
+
                 filename = os.path.basename(found_audio)
                 name_without_ext = os.path.splitext(filename)[0]
                 if name_without_ext.startswith("【"):
                     end_bracket = name_without_ext.find("】")
                     if end_bracket != -1:
-                        prompt_text = name_without_ext[end_bracket+1:]
+                        prompt_text = name_without_ext[end_bracket + 1:]
             else:
                 logger.warning(f"未找到语气'{tone}'对应的参考音频")
         else:
             logger.info("未指定语气，使用默认配置")
-        
-        print(f"\n=== TTS 语音合成 ===")
-        print(f"原文: {text}")
-        if tone:
-            print(f"语气: '{tone}'")
-        print(f"内容: '{content}'")
-        if ref_audio_path:
-            print(f"参考音频: {os.path.basename(ref_audio_path)}")
-        if prompt_text:
-            print(f"提示文本: '{prompt_text}'")
-        
-        # 发送 TTS 请求
-        play_result = asyncio.run(tts_request_and_stream_play(content, prompt_text, ref_audio_path))
-        
+
+        logger.info(
+            f"TTS参数: tone={tone or '普通'}, content_len={len(content)}, "
+            f"ref={os.path.basename(ref_audio_path) if ref_audio_path else '默认'}"
+        )
+
+        # 直接 await，避免 asyncio.run() 导致的事件循环冲突
+        play_result = await tts_request_and_stream_play(content, prompt_text, ref_audio_path)
+
         # 更新状态
+        def _apply(s: dict) -> dict:
+            ns = dict(s)
+            if play_result["success"]:
+                logger.info(
+                    f"TTS音频播放成功，时长: {format_duration(play_result['audio_duration'])}"
+                )
+                ns["tts_played"] = True
+                ns["tts_duration"] = play_result["audio_duration"]
+                ns["tts_tone"] = tone
+                ns["tts_content"] = content
+            else:
+                logger.error(f"TTS音频播放失败: {play_result['error']}")
+                ns["tts_error"] = play_result["error"]
+            return ns
+
         if isinstance(state, dict):
-            new_state = dict(state)
-            if play_result["success"]:
-                logger.info("TTS音频播放成功")
-                print(f"✓ TTS音频播放成功，时长: {format_duration(play_result['audio_duration'])}")
-                new_state["tts_played"] = True
-                new_state["tts_duration"] = play_result["audio_duration"]
-                new_state["tts_tone"] = tone
-                new_state["tts_content"] = content
-            else:
-                logger.error(f"TTS音频播放失败: {play_result['error']}")
-                print(f"✗ TTS音频播放失败: {play_result['error']}")
-                new_state["tts_error"] = play_result["error"]
-            return new_state
+            return _apply(state)
         else:
-            if play_result["success"]:
-                logger.info("TTS音频播放成功")
-                print(f"✓ TTS音频播放成功，时长: {format_duration(play_result['audio_duration'])}")
-                setattr(state, "tts_played", True)
-                setattr(state, "tts_duration", play_result["audio_duration"])
-                setattr(state, "tts_tone", tone)
-                setattr(state, "tts_content", content)
-            else:
-                logger.error(f"TTS音频播放失败: {play_result['error']}")
-                print(f"✗ TTS音频播放失败: {play_result['error']}")
-                setattr(state, "tts_error", play_result["error"])
+            # TypedDict / dataclass-like：先转成dict再写回
+            state_dict = {k: state[k] for k in state} if hasattr(state, "__getitem__") else dict(state)
+            updated = _apply(state_dict)
+            try:
+                for k, v in updated.items():
+                    setattr(state, k, v)
+            except Exception:
+                pass
             return state
-    
+
     except Exception as e:
-        logger.error(f"TTS节点执行失败: {e}")
         import traceback
-        traceback.print_exc()
-        print(f"✗ TTS节点执行异常: {e}")
-        
+        logger.error(f"TTS节点执行失败: {e}\n{traceback.format_exc()}")
         if isinstance(state, dict):
             new_state = dict(state)
             new_state["tts_error"] = str(e)
             return new_state
         else:
-            setattr(state, "tts_error", str(e))
+            try:
+                setattr(state, "tts_error", str(e))
+            except Exception:
+                pass
             return state
 
 def main():

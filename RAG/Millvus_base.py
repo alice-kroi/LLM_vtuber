@@ -394,11 +394,12 @@ def create_collection(client: MilvusClient, collection_name: str, db_name: str) 
             is_primary=True
         )
         
-        # 添加向量字段
+        # 添加向量字段（注意：字段名必须与 RAG_node 中使用的一致）
+        # 豆包嵌入模型 doubao-embedding-text-240715 的维度为 2560
         schema.add_field(
-            field_name="vector_field",
+            field_name="content_vector",
             datatype=DataType.FLOAT_VECTOR,
-            dim=768  # 使用豆包嵌入模型的维度（768）
+            dim=2560
         )
         
         # 添加其他必要字段
@@ -571,8 +572,8 @@ def insert_test_data(client: MilvusClient, collection_name: str, embedding_model
     contents = [msg["content"] for msg in test_messages]
     vectors = embedding_model.embed_documents(contents)
     print(f"生成的向量维度: {len(vectors[0])}")
-    
-    # 准备插入数据
+
+    # 准备插入数据（字段名与集合schema、RAG_node保持一致：content_vector）
     insert_data = []
     for i, msg in enumerate(test_messages):
         insert_data.append({
@@ -582,7 +583,7 @@ def insert_test_data(client: MilvusClient, collection_name: str, embedding_model
             "content": msg["content"],
             "timestamp": int(time.time()),
             "message_type": msg["message_type"],
-            "vector_field": vectors[i]
+            "content_vector": vectors[i]
         })
     
     # 插入数据
@@ -618,12 +619,12 @@ def query_test_data(client: MilvusClient, collection_name: str, embedding_model:
     # 执行向量搜索
     results = client.search(
         collection_name=collection_name,
-        data=[query_vector],  # 搜索数据
-        anns_field="vector_field",  # 向量字段名
-        limit=top_k,  # 返回结果数量
-        output_fields=["message_id", "user_id", "username", "content", "timestamp", "message_type"],  # 返回的字段
-        metric_type="COSINE",  # 相似度度量方式
-        params={"nprobe": 10}  # 搜索参数
+        data=[query_vector],            # 搜索数据
+        anns_field="content_vector",    # 向量字段名（必须与schema一致）
+        limit=top_k,                    # 返回结果数量
+        output_fields=["message_id", "user_id", "username", "content", "timestamp", "message_type"],
+        metric_type="COSINE",
+        params={"nprobe": 10}
     )
     
     # 显示查询结果

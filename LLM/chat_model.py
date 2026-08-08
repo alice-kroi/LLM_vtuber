@@ -1,21 +1,47 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-聊天模型模块 - 使用TypedDict定义langgraph状态结构
+聊天模型模块 - 基于 LangGraph 的 OpenAI 兼容 API 调用
+
+通用逻辑：
+- 构建 messages（system + history）
+- 通过 OpenAI SDK 调用兼容的 API（含超时、重试、简单的长度保护）
+- 返回 ChatState 或 状态字典（按原有调用约定）
 """
 
-from typing_extensions import TypedDict
-from langchain_core.messages import AnyMessage
-from typing import Optional
+import json
+import logging
 import os
-from openai import OpenAI
-from langchain_core.runnables import RunnableConfig
+import time
+from typing import Optional
+
 from langgraph.graph import START, END
 from langgraph.graph import StateGraph
+from langchain_core.messages import AnyMessage
+from langchain_core.runnables import RunnableConfig
+from openai import OpenAI, APIError, APIConnectionError, RateLimitError, APITimeoutError
+from typing_extensions import TypedDict
+
+logger = logging.getLogger(__name__)
+
+# --------- 常量配置 ---------
+# API调用超时：连接5s + 读60s，避免挂死
+API_CONNECT_TIMEOUT = 5.0
+API_READ_TIMEOUT = 60.0
+
+# 重试：瞬态网络错误/限流
+MAX_RETRIES = 2
+RETRY_BACKOFF_BASE = 0.8
+
+# 安全的对话历史字符上限（粗略保护，避免超长请求）
+# 如果 messages 总字符过大，截断最老的 user/assistant 消息直到满足
+MAX_HISTORY_CHARS = 20000
+
+
 class ChatState(TypedDict):
     """
     langgraph聊天状态定义 - 使用TypedDict确保类型安全
-    
+
     字段说明：
     - messages: 对话历史，包含所有消息
     - system_prompt: 系统提示词，定义AI的角色和行为
@@ -27,243 +53,226 @@ class ChatState(TypedDict):
     - error: 错误信息（如有）
     - tokens_used: 使用的token数
     - name: 消息发送者名称（对应OpenAI message格式中的name字段）
-    - tts_played: TTS是否播放成功
-    - tts_duration: TTS音频时长（秒）
-    - tts_tone: TTS使用的语气
-    - tts_content: TTS合成的内容
-    - tts_error: TTS错误信息（如有）
-    - tone: 提取的语气
-    - content: 提取的内容（去掉语气标记）
     """
-    messages: list[AnyMessage]      # 对话历史（使用langchain的AnyMessage类型）
-    system_prompt: str              # 系统提示词
-    response: Optional[str] = None  # 最新响应
-    model: str = "doubao-seed-1-8-251228"       # 模型名称（默认豆包）
-    temperature: float = 0.7        # 温度参数
-    max_tokens: int = 1024          # 最大token数
-    error: Optional[str] = None     # 错误信息
-    tokens_used: int = 0            # 使用的token数
-    api_key: Optional[str] = os.getenv("Doubao_API_KEY")  # API密钥（如果需要）
-    # TTS相关字段
-    tts_played: bool = False        # TTS是否播放成功
-    tts_duration: float = 0.0       # TTS音频时长（秒）
-    tts_tone: Optional[str] = None  # TTS使用的语气
-    tts_content: Optional[str] = None  # TTS合成的内容
-    tts_error: Optional[str] = None  # TTS错误信息
-    # 语气和内容字段
-    tone: Optional[str] = None      # 提取的语气
-    content: Optional[str] = None   # 提取的内容
-    api_url: Optional[str] = os.getenv("Doubao_API_URL")  # API URL（如果需要）
-    name: Optional[str] = None      # 消息发送者名称
+    messages: list[AnyMessage]
+    system_prompt: str
+    response: Optional[str] = None
+    model: str = "doubao-seed-1-8-251228"
+    temperature: float = 0.7
+    max_tokens: int = 1024
+    error: Optional[str] = None
+    tokens_used: int = 0
+    api_key: Optional[str] = os.getenv("Doubao_API_KEY")
+    tts_played: bool = False
+    tts_duration: float = 0.0
+    tts_tone: Optional[str] = None
+    tts_content: Optional[str] = None
+    tts_error: Optional[str] = None
+    tone: Optional[str] = None
+    content: Optional[str] = None
+    api_url: Optional[str] = os.getenv("Doubao_API_URL")
+    name: Optional[str] = None
+    question: Optional[str] = None
 
 
+# --------- 通用工具 ---------
+def _build_openai_messages(state: ChatState) -> list:
+    """
+    从 ChatState 构建 OpenAI 兼容的消息列表，并做长度保护（截断老消息）
+    """
+    # 系统提示词
+    messages_pre = []
+    system_prompt = state.get("system_prompt", "")
+    if system_prompt:
+        messages_pre.append({"role": "system", "content": system_prompt})
+
+    # 对话历史
+    history_msgs = []
+    state_messages = state.get("messages", []) or []
+    for msg in state_messages:
+        role = msg.role if hasattr(msg, "role") else (msg.get("role") if isinstance(msg, dict) else "user")
+        content = msg.content if hasattr(msg, "content") else (msg.get("content") if isinstance(msg, dict) else str(msg))
+        name_attr = msg.name if hasattr(msg, "name") else None
+        if name_attr is None and isinstance(msg, dict):
+            name_attr = msg.get("name") or state.get("name")
+        else:
+            name_attr = name_attr or state.get("name")
+
+        item: dict = {"role": role, "content": content}
+        if name_attr:
+            item["name"] = name_attr
+        history_msgs.append(item)
+
+    # 长度保护：从最老的历史开始丢，直到总字符量<=上限
+    while system_prompt and history_msgs:
+        total = len(system_prompt) + sum(len(m.get("content", "")) for m in history_msgs)
+        if total <= MAX_HISTORY_CHARS:
+            break
+        # 丢最老的非system消息（保留最近的）
+        history_msgs.pop(0)
+
+    return messages_pre + history_msgs
 
 
+def _parse_usage(usage_obj) -> int:
+    """从OpenAI响应中解析总token数"""
+    if not usage_obj:
+        return 0
+    total = getattr(usage_obj, "total_tokens", None)
+    if total is not None:
+        return int(total)
+    prompt_t = getattr(usage_obj, "prompt_tokens", 0) or 0
+    complete_t = getattr(usage_obj, "completion_tokens", 0) or 0
+    return int(prompt_t) + int(complete_t)
 
 
+def _extract_error_details(e: Exception) -> str:
+    """从 OpenAI SDK 异常中提取更详细的错误信息"""
+    details = ""
+    resp_text = None
+    if hasattr(e, "response") and e.response is not None:
+        try:
+            resp_text = getattr(e.response, "text", None)
+        except Exception:
+            resp_text = None
+    if resp_text:
+        try:
+            err = json.loads(resp_text).get("error")
+            if err:
+                details = f" - 详情: {err}" if isinstance(err, str) else f" - 详情: {json.dumps(err, ensure_ascii=False)}"
+        except Exception:
+            details = f" - 详情: {resp_text[:200]}"
+    return details
+
+
+def _call_chat_api_with_retry(state: ChatState, api_key: str, base_url: str) -> dict:
+    """
+    调用 OpenAI 兼容聊天 API，带超时和瞬态错误重试。
+    返回 {"response": str, "tokens_used": int}，失败则抛出异常。
+    """
+    client = OpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        timeout=(API_CONNECT_TIMEOUT, API_READ_TIMEOUT),
+        max_retries=0  # 我们自己管理重试，有更细的控制
+    )
+
+    openai_messages = _build_openai_messages(state)
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            resp_obj = client.chat.completions.create(
+                model=state["model"],
+                messages=openai_messages,
+                temperature=state["temperature"],
+                max_tokens=state["max_tokens"],
+                top_p=state.get("top_p", 1.0),
+                frequency_penalty=state.get("frequency_penalty", 0.0),
+                presence_penalty=state.get("presence_penalty", 0.0),
+                stream=False
+            )
+            msg = resp_obj.choices[0].message
+            ai_resp = ""
+            if hasattr(msg, "content") and msg.content:
+                ai_resp = msg.content
+            elif hasattr(msg, "reasoning_content") and msg.reasoning_content:
+                ai_resp = msg.reasoning_content
+
+            tokens = _parse_usage(getattr(resp_obj, "usage", None))
+            return {"response": ai_resp, "tokens_used": tokens}
+
+        except (APIConnectionError, RateLimitError, APITimeoutError, APIError) as e:
+            last_exc = e
+            if attempt < MAX_RETRIES:
+                backoff = RETRY_BACKOFF_BASE * (2 ** attempt)
+                logger.warning(
+                    f"[LLM] API瞬态错误(type={type(e).__name__}), "
+                    f"重试{attempt+1}/{MAX_RETRIES}, {backoff:.1f}s后..."
+                )
+                time.sleep(backoff)
+            else:
+                raise
+        except Exception as e:
+            # 非瞬态错误不重试：直接抛
+            raise
+
+    # 理论不可达
+    raise last_exc if last_exc else RuntimeError("未知错误")
+
+
+# --------- 两个聊天节点（保留原有的返回结构约定） ---------
 def openai_chat_node(state: ChatState) -> ChatState:
-    """
-    使用OpenAI API的聊天节点函数
-    
-    Args:
-        state: 聊天状态对象
-        
-    Returns:
-        更新后的聊天状态，包含AI响应
-    """
+    """OpenAI API聊天节点"""
+    api_key = os.getenv("OPENAI_API_KEY")
+    api_base = os.getenv("OPENAI_API_URL")
+
     try:
-        # 1. 从环境变量获取OpenAI API配置
-        api_key = os.getenv("OPENAI_API_KEY")
-        api_base = os.getenv("OPENAI_API_URL")  # 可选的API地址
-        
         if not api_key:
             raise ValueError("环境变量 OPENAI_API_KEY 未设置")
-        
-        # 2. 创建OpenAI客户端
-        client_params = {"api_key": api_key}
-        if api_base:
-            client_params["base_url"] = api_base
-            
-        client = OpenAI(**client_params)
-        
-        # 3. 构建消息列表（转换为OpenAI兼容格式）
-        openai_messages = []
-        
-        # 添加系统提示词（如果有）
-        if state["system_prompt"]:
-            openai_messages.append({"role": "system", "content": state["system_prompt"]})
-        
-        # 添加对话历史
-        for msg in state["messages"]:
-            # 转换langchain消息到OpenAI消息格式
-            openai_role = msg.role if hasattr(msg, "role") else "user"
-            openai_content = msg.content if hasattr(msg, "content") else str(msg)
-            # 检查是否有name字段
-            openai_name = msg.name if hasattr(msg, "name") else state.get("name")
-            # 构建消息对象
-            message_obj = {"role": openai_role, "content": openai_content}
-            if openai_name:
-                message_obj["name"] = openai_name
-            openai_messages.append(message_obj)
-        
-        # 4. 调用OpenAI API
-        response = client.chat.completions.create(
-            model=state["model"],
-            messages=openai_messages,
-            temperature=state["temperature"],
-            max_tokens=state["max_tokens"],
-            top_p=state.get("top_p", 1.0),  # 可选参数
-            frequency_penalty=state.get("frequency_penalty", 0.0),  # 可选参数
-            presence_penalty=state.get("presence_penalty", 0.0)  # 可选参数
+
+        result = _call_chat_api_with_retry(
+            state,
+            api_key=api_key,
+            base_url=api_base if api_base else "https://api.openai.com/v1/"
         )
-        
-        # 5. 解析响应
-        message = response.choices[0].message
-        # 处理消息内容 - 优先使用 content
-        ai_response = message.content if hasattr(message, "content") and message.content else ""
-        
-        # 解析 token 使用情况
-        tokens_used = response.usage.total_tokens if hasattr(response.usage, "total_tokens") else 0
-        
-        # 6. 可选：打印配置信息（如果提供）
-        if state.get("config") and "configurable" in state.get("config", {}):
-            user_id = state.get("config", {}).get("configurable", {}).get("user_id", "unknown")
-            print(f"[OpenAI] 处理用户请求 - 用户ID: {user_id}")
-        
-        # 7. 更新状态并返回
+
         return ChatState(
-            messages=state["messages"],  # 保持原始消息列表
+            messages=state["messages"],
             system_prompt=state["system_prompt"],
-            question=state["question"],
-            response=ai_response,  # 更新响应
+            question=state.get("question"),
+            response=result["response"],
             model=state["model"],
             temperature=state["temperature"],
             max_tokens=state["max_tokens"],
-            error=None,  # 清除错误
-            tokens_used=tokens_used  # 更新使用的token数
+            error=None,
+            tokens_used=result["tokens_used"]
         )
-        
+
     except Exception as e:
-        # 处理错误并返回错误状态
-        error_msg = f"OpenAI API调用失败: {str(e)}"
-        
-        # 获取更详细的错误信息（如果可用）
-        if hasattr(e, "response") and hasattr(e.response, "text"):
-            try:
-                import json
-                error_details = json.loads(e.response.text)
-                if error_details.get("error"):
-                    error_msg += f" - 详情: {error_details['error']}"
-            except:
-                pass
-        
+        err = f"OpenAI API调用失败: {str(e)}{_extract_error_details(e)}"
+        logger.error(f"[LLM] {err}")
         return ChatState(
-            **state,  # 保持其他状态不变
-            response="",  # 清除响应
-            error=error_msg  # 设置错误信息
+            **state,
+            response="",
+            error=err
         )
-    
 
 
-def doubao_chat_node(state: ChatState) -> ChatState:
+def doubao_chat_node(state: ChatState) -> dict:
     """
-    使用豆包API的聊天节点函数（基于OpenAI兼容接口）
-    
-    Args:
-        state: 聊天状态对象
-        config: 可选的RunnableConfig（包含用户ID等配置）
-        
-    Returns:
-        更新后的聊天状态，包含AI响应
+    豆包API聊天节点
+    注意：返回 dict（与原有约定一致），而不是 ChatState。
+    区别于 openai_chat_node：会把 AI 回复追加到 messages 列表中。
     """
     try:
-        # 1. 从环境变量获取豆包API配置
         api_key = os.getenv("Doubao_API_KEY")
         api_base = os.getenv("Doubao_API_URL", "https://api.doubao.com/v1/")
-        
+
         if not api_key:
             raise ValueError("环境变量 Doubao_API_KEY 未设置")
-        
-        # 2. 创建OpenAI客户端（豆包API兼容OpenAI接口）
-        client = OpenAI(
-            api_key=api_key,
-            base_url=api_base  # 豆包API地址
-        )
-        
-        # 3. 构建消息列表（转换为OpenAI/豆包兼容格式）
-        doubao_messages = []
-        
-        # 添加系统提示词（如果有）
-        if state["system_prompt"]:
-            doubao_messages.append({"role": "system", "content": state["system_prompt"]})
-        
-        # 添加对话历史
-        for msg in state["messages"]:
-            # 转换langchain消息到豆包兼容格式
-            msg_role = msg.role if hasattr(msg, "role") else "user"
-            msg_content = msg.content if hasattr(msg, "content") else str(msg)
-            # 检查是否有name字段
-            msg_name = msg.name if hasattr(msg, "name") else state.get("name")
-            # 构建消息对象
-            message_obj = {"role": msg_role, "content": msg_content}
-            if msg_name:
-                message_obj["name"] = msg_name
-            doubao_messages.append(message_obj)
-        
-        # 4. 调用豆包API
-        response = client.chat.completions.create(
-            model=state["model"],  # 豆包模型名称
-            messages=doubao_messages,
-            temperature=state["temperature"],
-            max_tokens=state["max_tokens"],
-            top_p=state.get("top_p", 1.0),  # 可选参数
-            frequency_penalty=state.get("frequency_penalty", 0.0),  # 可选参数
-            presence_penalty=state.get("presence_penalty", 0.0)  # 可选参数
-        )
-        #print(response)
-        # 5. 解析响应
-        message = response.choices[0].message
-        # 处理豆包特有的消息结构 - 优先使用 content，然后是 reasoning_content
-        ai_response = message.content if hasattr(message, "content") and message.content else getattr(message, "reasoning_content", "")
-        
-        # 解析 token 使用情况 - 处理不同的 usage 结构
-        tokens_used = 0
-        if hasattr(response, "usage"):
-            if hasattr(response.usage, "total_tokens"):
-                tokens_used = response.usage.total_tokens
-            elif hasattr(response.usage, "completion_tokens") and hasattr(response.usage, "prompt_tokens"):
-                tokens_used = response.usage.completion_tokens + response.usage.prompt_tokens
-        
-        
-        
-        # 7. 更新状态并返回
+
+        result = _call_chat_api_with_retry(state, api_key=api_key, base_url=api_base)
+
+        logger.info(f"[LLM] 豆包调用成功: tokens={result['tokens_used']}, 响应长度={len(result['response'])}")
+
         return {
-            **state,  # 保持其他状态不变
-            "messages": state["messages"]+[
-                {"role": "assistant", "content": ai_response}
-            ],  # 添加AI响应到消息列表
-            "response": ai_response,  # 更新响应
-            "tokens_used": tokens_used  # 更新使用的token数
+            **state,
+            "messages": list(state.get("messages", [])) + [
+                {"role": "assistant", "content": result["response"]}
+            ],
+            "response": result["response"],
+            "tokens_used": result["tokens_used"],
+            "error": None
         }
-        
+
     except Exception as e:
-        # 处理错误并返回错误状态
-        error_msg = f"豆包API调用失败: {str(e)}"
-        
-        # 获取更详细的错误信息（如果可用）
-        if hasattr(e, "response") and hasattr(e.response, "text"):
-            try:
-                import json
-                error_details = json.loads(e.response.text)
-                if error_details.get("error"):
-                    error_msg += f" - 详情: {error_details['error']}"
-            except:
-                pass
-        
+        err = f"豆包API调用失败: {str(e)}{_extract_error_details(e)}"
+        logger.error(f"[LLM] {err}")
         return {
-            **state,  # 保持其他状态不变
-            "response": "",  # 清除响应
-            "error": error_msg  # 设置错误信息
+            **state,
+            "response": "",
+            "error": err
         }
 
 

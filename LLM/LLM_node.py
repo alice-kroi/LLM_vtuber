@@ -3,17 +3,20 @@
 """
 基于 LangGraph 框架的大模型节点模块
 
-实现大模型对话节点，为 LLM_vtuber 项目提供模块化的大模型交互能力。
+提供两个对外函数（保持原有接口）：
+- llm_chat_node(state): 纯聊天
+- context_aware_qa_node(state): 在 system_prompt 后拼上下文，然后调用
+
+两个函数都委托给内部的 _run_doubao_chat，避免大量重复。
 """
+
+import logging
 
 from typing_extensions import TypedDict
 from langchain_core.messages import AnyMessage
-from typing import Optional, Dict, List, Union, Any
-import logging
-import time
+from typing import Optional
 
 from chat_model import ChatState, doubao_chat_node
-
 
 logger = logging.getLogger(__name__)
 
@@ -21,132 +24,91 @@ logger = logging.getLogger(__name__)
 class LLMState(ChatState):
     """
     LLM 节点状态定义，基于 ChatState 扩展
-    
+
     字段说明：
     - 继承自 ChatState 的所有字段
     - question: 当前用户问题
-    - context: 上下文信息
-    - name: 消息发送者名称（对应OpenAI message格式中的name字段）
+    - context: 上下文信息（RAG 检索结果）
+    - name: 消息发送者名称
     """
-    question: Optional[str] = None  # 当前用户问题
-    context: Optional[str] = None   # 上下文信息
-    name: Optional[str] = None      # 消息发送者名称
+    question: Optional[str] = None
+    context: Optional[str] = None
+    name: Optional[str] = None
+
+
+def _extract_last_user_question(state: LLMState) -> Optional[str]:
+    """从状态中提取最后一条用户消息内容作为 question"""
+    if state.get("question"):
+        return state["question"]
+    for msg in reversed(state.get("messages", []) or []):
+        role = msg.role if hasattr(msg, "role") else (msg.get("role") if isinstance(msg, dict) else None)
+        if role == "user":
+            content = msg.content if hasattr(msg, "content") else (msg.get("content") if isinstance(msg, dict) else None)
+            return content
+    return None
+
+
+def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
+    """
+    统一的豆包聊天执行逻辑。
+
+    Args:
+        state: LLM 状态
+        with_context: 是否把 state["context"] 拼接到 system_prompt 末尾
+    """
+    try:
+        logger.info(f"执行 {'上下文感知问答' if with_context else '大模型对话'} 节点")
+
+        question = _extract_last_user_question(state)
+        if not question:
+            raise ValueError("未找到用户问题")
+
+        # 构建 system prompt（可选拼上 RAG 上下文）
+        system_prompt = state["system_prompt"] or ""
+        if with_context and state.get("context"):
+            system_prompt = f"{system_prompt}\n\n[上下文信息]\n{state['context']}".strip()
+
+        logger.info(f"处理用户问题: {question[:50]}...")
+
+        # 组装 ChatState（保持 name 传递）
+        chat_state = ChatState(
+            messages=state["messages"],
+            system_prompt=system_prompt,
+            model=state["model"],
+            temperature=state["temperature"],
+            max_tokens=state["max_tokens"],
+            name=state.get("name")
+        )
+
+        result = doubao_chat_node(chat_state)
+
+        return {
+            **state,
+            "response": result.get("response"),
+            "messages": result.get("messages", state["messages"]),
+            "tokens_used": result.get("tokens_used", 0),
+            "error": result.get("error")
+        }
+
+    except Exception as e:
+        tag = "上下文感知的问题回答节点" if with_context else "大模型对话节点"
+        error_msg = f"{tag}失败: {str(e)}"
+        logger.error(error_msg)
+        return {
+            **state,
+            "response": None,
+            "error": error_msg
+        }
 
 
 def llm_chat_node(state: LLMState) -> LLMState:
-    """
-    大模型对话节点
-    
-    接收用户问题，调用大模型生成回答，可嵌入到 langgraph 的图中。
-    
-    Args:
-        state: LLM 状态对象，包含对话历史和系统提示词
-    
-    Returns:
-        更新后的 LLM 状态，包含大模型生成的回答
-    """
-    try:
-        logger.info("执行大模型对话节点")
-        
-        # 构建 ChatState 用于调用现有的聊天节点
-        chat_state = ChatState(
-            messages=state["messages"],
-            system_prompt=state["system_prompt"],
-            model=state["model"],
-            temperature=state["temperature"],
-            max_tokens=state["max_tokens"],
-            api_key=state.get("api_key"),
-            api_url=state.get("api_url"),
-            name=state.get("name")
-        )
-        
-        # 调用豆包聊天节点生成回答
-        result = doubao_chat_node(chat_state)
-        
-        # 更新状态并返回
-        return {
-            **state,
-            "response": result.get("response"),
-            "messages": result.get("messages", state["messages"]),
-            "tokens_used": result.get("tokens_used", 0),
-            "error": result.get("error")
-        }
-        
-    except Exception as e:
-        error_msg = f"大模型对话节点失败: {str(e)}"
-        logger.error(error_msg)
-        return {
-            **state,
-            "response": None,
-            "error": error_msg
-        }
+    """大模型对话节点（不带RAG上下文增强）"""
+    return _run_doubao_chat(state, with_context=False)
 
 
 def context_aware_qa_node(state: LLMState) -> LLMState:
-    """
-    上下文感知的问题回答节点
-    
-    结合上下文信息和用户问题，调用大模型生成回答。
-    
-    Args:
-        state: LLM 状态对象，包含用户问题和上下文
-    
-    Returns:
-        更新后的 LLM 状态，包含大模型生成的回答
-    """
-    try:
-        logger.info("执行上下文感知的问题回答节点")
-        
-        # 提取用户问题
-        question = state.get("question")
-        if not question:
-            # 尝试从消息历史中提取最后一条用户消息
-            for msg in reversed(state.get("messages", [])):
-                if msg.get("role") == "user":
-                    question = msg.get("content")
-                    break
-            if not question:
-                raise ValueError("未找到用户问题")
-        
-        # 构建增强的系统提示词，包含上下文信息
-        enhanced_system_prompt = state["system_prompt"]
-        
-        # 添加上下文信息
-        if state.get("context"):
-            enhanced_system_prompt += f"\n\n[上下文信息]\n{state['context']}"
-        
-        logger.info(f"处理用户问题: {question[:50]}...")
-        
-        # 构建 ChatState 用于调用现有的聊天节点
-        chat_state = ChatState(
-            messages=state["messages"],
-            system_prompt=enhanced_system_prompt,
-            model=state["model"],
-            temperature=state["temperature"],
-            max_tokens=state["max_tokens"],
-            name=state.get("name")
-        )
-        
-        # 调用豆包聊天节点生成回答
-        result = doubao_chat_node(chat_state)
-        
-        # 更新状态并返回
-        return {
-            **state,
-            "response": result.get("response"),
-            "messages": result.get("messages", state["messages"]),
-            "tokens_used": result.get("tokens_used", 0),
-            "error": result.get("error")
-        }
-        
-    except Exception as e:
-        error_msg = f"上下文感知的问题回答节点失败: {str(e)}"
-        logger.error(error_msg)
-        return {
-            **state,
-            "response": None,
-            "error": error_msg
-        }
+    """上下文感知的问题回答节点（拼上 state['context'] 后调用 LLM）"""
+    return _run_doubao_chat(state, with_context=True)
 
 
 if __name__ == "__main__":

@@ -34,14 +34,13 @@ def openai_message_node(state: MessageState) -> MessageState:
     """
     try:
         logger.info("执行 OpenAI 消息格式处理节点")
-        
+
         # 1. 检查必要的配置
         api_key = os.getenv("Doubao_API_KEY")
-        logger.info(f"API Key: {api_key}")
         if not api_key:
             raise ValueError("环境变量 Doubao_API_KEY 未设置")
-        logger.info("使用真实 API 调用")
-        
+        logger.info("API Key 已配置，使用真实 API 调用")
+
         # 2. 创建 OpenAI 客户端
         client = OpenAI(api_key=api_key, base_url=os.getenv("Doubao_API_URL", "https://api.doubao.com/v1/"))
         
@@ -130,10 +129,8 @@ def openai_message_node(state: MessageState) -> MessageState:
         
     except Exception as e:
         error_msg = f"OpenAI 消息格式处理节点失败: {str(e)}"
-        logger.error(error_msg)
-        import traceback
-        traceback.print_exc()
-        
+        logger.error(error_msg, exc_info=True)
+
         # 更新错误信息
         error_state = state.copy()
         error_state["error_info"] = {
@@ -142,85 +139,8 @@ def openai_message_node(state: MessageState) -> MessageState:
             "error_timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "recovery_status": "failed"
         }
-        
-        return error_state
 
-def _get_mock_response(state: MessageState) -> MessageState:
-    """
-    获取模拟响应
-    
-    Args:
-        state: 消息状态
-    
-    Returns:
-        包含模拟响应的消息状态
-    """
-    logger.info("使用模拟响应")
-    
-    # 模拟响应内容
-    mock_responses = {
-        "你好，能介绍一下自己吗？": "你好！我是一个AI助手，很高兴为你服务。我可以回答问题、提供信息、帮助你完成各种任务。请问有什么我可以帮助你的吗？",
-        "今天天气怎么样？": "今天天气晴朗，适合户外活动。温度适中，大约在20-25摄氏度之间。",
-        "如何学习Python编程？": "学习Python编程可以从基础语法开始，然后逐步学习面向对象编程、模块和包的使用，最后学习一些常用的库和框架。",
-        "推荐一部好看的电影": "推荐你看《盗梦空间》，这是一部非常精彩的科幻电影，导演是克里斯托弗·诺兰。",
-        "什么是人工智能？": "人工智能是指让计算机模拟人类智能的技术，包括机器学习、深度学习、自然语言处理等多个领域。"
-    }
-    
-    # 获取最后一条用户消息
-    user_message = None
-    for msg in reversed(state.get("messages", [])):
-        if msg.get("role") == "user":
-            user_message = msg
-            break
-    
-    # 生成模拟响应
-    if user_message:
-        content = user_message.get("content", "")
-        ai_response = mock_responses.get(content, "我是一个AI助手，很高兴为你服务。")
-    else:
-        ai_response = "我是一个AI助手，很高兴为你服务。"
-    
-    # 创建 AI 响应消息
-    ai_message = {
-        "message_id": str(state.get("message_id", "")[:8]) + "-assistant",
-        "role": "assistant",
-        "content": ai_response,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "vector": None,  # 向量字段，后续可以通过嵌入模型生成
-        "metadata": {
-            "model": "mock-model",
-            "tokens_used": 100,
-            "response_time": 0.5
-        },
-        "status": "processed"
-    }
-    
-    # 更新消息状态
-    new_state = add_message_to_state(state, ai_message)
-    
-    # 存储 AI 消息到数据库
-    data_persistence = get_data_persistence()
-    if not data_persistence.store_message(ai_message):
-        logger.warning("存储 AI 消息到数据库失败")
-    
-    # 更新指标
-    new_state["metrics"]["total_tokens"] += 100
-    if new_state["metrics"]["assistant_message_count"] > 0:
-        new_state["metrics"]["average_response_time"] = (
-            (new_state["metrics"]["average_response_time"] * (new_state["metrics"]["assistant_message_count"] - 1) + 0.5) /
-            new_state["metrics"]["assistant_message_count"]
-        )
-    
-    # 清除错误信息
-    new_state["error_info"] = {
-        "error_code": None,
-        "error_message": None,
-        "error_timestamp": None,
-        "recovery_status": "pending"
-    }
-    
-    logger.info(f"模拟响应生成成功，响应长度: {len(ai_response)}")
-    return new_state
+        return error_state
 
 
 def validate_openai_message_format(messages: List[Dict[str, Any]]) -> bool:

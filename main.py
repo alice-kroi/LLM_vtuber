@@ -15,9 +15,14 @@ import asyncio
 import argparse
 import json
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import aiohttp
 from aiohttp import web
+
+# 配置日志（必须在其他模块导入前定义，因为导入时可能已需要logger）
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # 添加 LLM 目录到系统路径
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "LLM"))
@@ -55,7 +60,7 @@ except ImportError as e:
     Live2DConfig = None
     ActionGenerator = None
     Direction = None
-    print(f"警告: Live2D模块导入失败: {e}")
+    logger.warning(f"Live2D模块导入失败: {e}")
 
 # 全局变量
 args = None
@@ -64,12 +69,11 @@ langgraph_manager = None
 live2d_manager = None
 live2d_action_generator = None
 
-# 允许的语气列表（与 audio_main.py 保持一致）
-ALLOWED_TONES = {
-    "扮演慌张", "调皮", "尴尬", "感动", "积极", "急了", "假装",
-    "惊喜", "开心", "撩拨", "难过", "普通", "撒娇", "生气",
-    "严肃", "疑问", "自言"
-}
+# 消息处理队列：串行处理弹幕，避免 Live2D/TTS 并发冲突导致死锁
+# （move_to_direction 持锁 1.5s，TTS 播放需独占音频，并发会导致排队卡死）
+_message_queue: asyncio.Queue = None
+_queue_worker_task: asyncio.Task = None
+_QUEUE_MAX_SIZE = 10  # 队列上限，超过则丢弃旧消息（弹幕时效性强，保留最新的）
 
 # 命令行参数解析
 def parse_args():
@@ -81,7 +85,7 @@ def parse_args():
     parser.add_argument("--live2d-host", type=str, default="localhost", help="VTube Studio 服务器地址")
     parser.add_argument("--live2d-port", type=int, default=8001, help="VTube Studio 服务器端口")
     parser.add_argument("--live2d-sensitivity", type=float, default=1.0, help="动作灵敏度 (0.1-2.0)")
-    parser.add_argument("--live2d-speed", type=float, default=1.5, help="响应速度/移动时间 (秒)")
+    parser.add_argument("--live2d-speed", type=float, default=2.5, help="响应速度/移动时间 (秒)，值越大动作越慢越柔和")
     parser.add_argument("--live2d-smoothness", type=float, default=0.8, help="动作平滑度 (0.0-1.0)")
     parser.add_argument("--live2d-eye-tracking", action="store_true", default=True, help="启用目光追踪")
     parser.add_argument("--live2d-expression", action="store_true", default=True, help="启用表情动作")
@@ -92,37 +96,50 @@ def parse_args():
 # 异步HTTP服务器处理函数
 async def handle_post_request(request):
     """
-    处理POST请求
+    处理POST请求：将消息放入队列串行处理，立即返回响应。
+
+    使用队列的原因：Live2D 的 move_to_direction 持有 operation_lock 长达 1.5s，
+    TTS 播放也需独占音频设备。若每条弹幕都并发启动 graph.ainvoke，会导致
+    锁竞争排队甚至死锁，TTS 永远无法执行。串行处理确保每条消息完整走完
+    init→rag→llm→rag_save→live2d→tts→finalize 流程。
     """
     try:
         # 读取请求体
         request_data = await request.json()
 
         # 直接打印请求信息
-        print(f"收到HTTP请求: {json.dumps(request_data, ensure_ascii=False)}")
+        logger.info(f"收到HTTP请求: {json.dumps(request_data, ensure_ascii=False)}")
 
-        # 处理请求
+        # 规范化为消息列表
         if isinstance(request_data, list):
-            # 处理messages数组格式
             messages = request_data
-            await handle_messages(messages)
         elif isinstance(request_data, dict) and 'messages' in request_data:
-            # 处理包含messages字段的格式
             messages = request_data['messages']
-            await handle_messages(messages)
         else:
-            # 处理单个消息格式
-            await handle_single_message(request_data)
+            messages = [request_data]
 
-        # 发送响应
+        # 队列满时丢弃旧消息（弹幕时效性强，优先处理最新的）
+        while _message_queue and _message_queue.qsize() >= _QUEUE_MAX_SIZE:
+            try:
+                _message_queue.get_nowait()
+                _message_queue.task_done()
+                logger.warning(f"消息队列已满({_QUEUE_MAX_SIZE})，丢弃旧消息")
+            except asyncio.QueueEmpty:
+                break
+
+        if _message_queue is not None:
+            await _message_queue.put(messages)
+            logger.info(f"消息已入队列（当前队列长度: {_message_queue.qsize()}）")
+
+        # 立即返回，不等处理完成（避免弹幕转发阻塞）
         return web.Response(
             status=200,
             content_type='application/json',
-            text=json.dumps({'status': 'success'})
+            text=json.dumps({'status': 'queued'})
         )
 
     except Exception as e:
-        print(f"处理HTTP请求失败: {e}")
+        logger.error(f"处理HTTP请求失败: {e}")
         # 发送错误响应
         return web.Response(
             status=500,
@@ -132,74 +149,66 @@ async def handle_post_request(request):
 
 async def handle_messages(messages):
     """
-    处理messages数组
+    处理消息列表，统一入口（合并了原handle_messages和handle_single_message）
     """
     global langgraph_manager
-    if langgraph_manager:
-        # 直接打印消息信息
-        print(f"处理messages数组: {json.dumps(messages, ensure_ascii=False)}")
+    if not langgraph_manager:
+        return
 
-        # 创建LLM状态
-        initial_state = LLMState(
-            messages=messages,
-            system_prompt="你是一个友好的AI助手，用简洁明了的语言回答用户的问题。",
-            model="doubao-seed-1-8-251228",
-            temperature=0.7,
-            max_tokens=500
-        )
+    # 确保messages是列表格式
+    if not isinstance(messages, list):
+        messages = [messages]
 
-        # 运行图
-        print("运行LangGraph处理消息")
-        await langgraph_manager.run_with_messages(initial_state)
+    logger.info(f"处理消息: {json.dumps(messages, ensure_ascii=False)}")
+
+    # 创建LLM状态并运行
+    initial_state = create_default_llm_state(messages=messages)
+    logger.info("运行LangGraph处理消息")
+    await langgraph_manager.run_with_messages(initial_state)
+
+
+async def _queue_worker():
+    """
+    队列工作协程：串行处理消息，避免 Live2D/TTS 并发冲突。
+
+    每条消息依次走完完整流程（init→rag→llm→rag_save→live2d→tts→finalize），
+    确保operation_lock不会因并发争抢而卡死，TTS音频也不会重叠播放。
+    """
+    logger.info("消息队列 worker 已启动")
+    while True:
+        try:
+            messages = await _message_queue.get()
+            logger.info(f"从队列取出消息处理（剩余队列长度: {_message_queue.qsize()}）")
+            await handle_messages(messages)
+        except asyncio.CancelledError:
+            logger.info("消息队列 worker 被取消")
+            break
+        except Exception as e:
+            logger.error(f"队列 worker 处理消息异常: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+        finally:
+            try:
+                _message_queue.task_done()
+            except Exception:
+                pass
+    logger.info("消息队列 worker 已退出")
+
 
 # Live2D 动作联动节点
 async def live2d_action_node(state: LLMState) -> LLMState:
     """
     Live2D 动作联动节点
 
-    直接执行大模型生成的动作，包括目光方向和嘴巴状态。
-
-    Args:
-        state: LangGraph状态，包含以下字段：
-            - response: 大模型生成的响应（格式：【语气】内容|目光方向|嘴巴状态）
-            - visual_focus: 目光方向（从响应中解析）
-            - mouth_state: 嘴巴状态（从响应中解析）
-
-    Returns:
-        更新后的状态，包含动作执行信息
+    从大模型响应中解析动作信息，执行目光方向和嘴巴状态动作。
     """
-    global live2d_manager, args
+    global live2d_manager
 
     try:
-        # 直接从 response 字段中解析动作信息（而不是从 state 中读取）
         response = state.get("response", "")
-        visual_focus = "center"
-        mouth_state = "close"
-        
-        if response and response.startswith("【"):
-            # 查找第一个"】"来分离语气和内容
-            end_bracket = response.find("】")
-            if end_bracket != -1:
-                # 提取剩余部分
-                rest = response[end_bracket+1:].strip()
-                
-                # 查找"|"分隔符（用于动作信息）
-                parts = rest.split("|")
-                content = parts[0].strip()
-                
-                # 解析目光方向
-                if len(parts) > 1:
-                    direction = parts[1].strip().lower()
-                    valid_directions = ["center", "up", "down", "left", "right", 
-                                      "upleft", "upright", "downleft", "downright"]
-                    if direction in valid_directions:
-                        visual_focus = direction
-                
-                # 解析嘴巴状态
-                if len(parts) > 2:
-                    mouth = parts[2].strip().lower()
-                    if mouth in ["open", "close"]:
-                        mouth_state = mouth
+        parsed = parse_response_format(response, enable_live2d=True)
+        visual_focus = parsed["visual_focus"]
+        mouth_state = parsed["mouth_state"]
 
         if not live2d_manager or not live2d_manager.is_connected:
             logger.warning("Live2D控制器未连接，跳过动作")
@@ -211,11 +220,10 @@ async def live2d_action_node(state: LLMState) -> LLMState:
 
         # 执行目光方向动作
         try:
-            await live2d_manager.move_to_direction(
-                direction=visual_focus,
-                duration=1.5
-            )
-            logger.info(f"✓ 执行目光方向: {visual_focus}")
+            # 使用命令行参数 --live2d-speed 控制移动时长（默认3秒）
+            duration = args.live2d_speed if args is not None else 3.0
+            await live2d_manager.move_to_direction(direction=visual_focus, duration=duration)
+            logger.info(f"✓ 执行目光方向: {visual_focus}（时长 {duration:.1f}s）")
         except Exception as e:
             logger.error(f"执行目光方向失败: {e}")
 
@@ -223,86 +231,173 @@ async def live2d_action_node(state: LLMState) -> LLMState:
         try:
             if mouth_state == "open":
                 await live2d_manager.open_mouth()
-                logger.info(f"✓ 执行张嘴动作")
             else:
                 await live2d_manager.close_mouth()
-                logger.info(f"✓ 执行闭嘴动作")
+            logger.info(f"✓ 执行嘴巴动作: {mouth_state}")
         except Exception as e:
             logger.error(f"执行嘴巴动作失败: {e}")
 
         state["live2d_status"] = "success"
         state["live2d_message"] = f"目光:{visual_focus}, 嘴巴:{mouth_state}"
-
         return state
 
     except Exception as e:
         logger.error(f"Live2D动作节点执行失败: {e}")
-        import traceback
-        traceback.print_exc()
         state["live2d_status"] = "error"
         state["live2d_error"] = str(e)
         state["live2d_message"] = f"执行失败: {e}"
         return state
 
-async def handle_single_message(message_data):
+# 允许的语气列表（与 audio_main.py 保持一致）
+ALLOWED_TONES = {
+    "扮演慌张", "调皮", "尴尬", "感动", "积极", "急了", "假装",
+    "惊喜", "开心", "撩拨", "难过", "普通", "撒娇", "生气",
+    "严肃", "疑问", "自言"
+}
+
+# 系统提示词常量
+SYSTEM_PROMPT_LIVE2D = """
+你是一位由Live2D技术驱动的AI虚拟主播，名叫爱莉希雅。
+
+## 角色设定
+- **身份**: 活泼可爱的二次元虚拟主播，拥有粉色长发和灵动的大眼睛
+- **性格**: 元气满满、俏皮可爱、温柔体贴，偶尔会有点小调皮
+- **说话风格**: 使用可爱的口语化表达，适当加入语气词和表情符号
+- **口头禅**: 喜欢用"~"、"呢"、"呀"等结尾，让回答更有亲和力
+
+## 直播互动规则
+- 时刻保持热情友好的态度，让观众感受到温暖和快乐
+- 回答要简洁明快，适合语音合成播放
+- 可以适当加入一些主播常用的互动话术
+- 保持积极向上的氛围
+
+## 回答格式要求
+请在回答时使用以下格式输出：
+【语气】回答内容|目光方向|嘴巴状态
+
+其中：
+1. 语气必须从以下列表中选择：
+   扮演慌张、调皮、尴尬、感动、积极、急了、假装、惊喜、开心、撩拨、难过、普通、撒娇、生气、严肃、疑问、自言
+
+2. 目光方向必须从以下选项中选择一个（不要总是选center，要多样化选择）：
+   center、up、down、left、right、upleft、upright、downleft、downright
+
+3. 嘴巴状态必须为以下之一：
+   open（张开嘴巴，说话时）、close（闭合嘴巴，安静思考时）
+
+## 目光方向选择指南（重要！）
+目光方向要多样化，**不要总是选择center**！按照以下优先级选择：
+
+**内容相关方向（优先）**：
+- 提到"上面/天上/高/天空/飞"相关内容 → up
+- 提到"下面/地下/低/地面/地板"相关内容 → down
+- 提到"左边/左/左侧"相关内容 → left
+- 提到"右边/右/右侧"相关内容 → right
+- 提到"左上/右上/左下/右下"等对角方向 → 对应方向
+
+**情绪动作（可选）**：
+- 开心/惊喜/撩拨时 → 可选 up/center
+- 调皮/撒娇时 → 可选 left/right
+- 疑问/思考时 → 可选 up/down
+- 生气/难过时 → 可选 down
+
+**默认规则**：如果内容没有明确的方向提示，优先选择 up/down/left/right 中的一个，而不是 center！
+
+**建议分布**：center 占比不超过 30%，其他方向占比 70%
+
+## 嘴巴状态选择
+- 说话中 → open
+- 句子结束、停顿、思考 → close
+"""
+
+SYSTEM_PROMPT_DEFAULT = "你是一个友好的AI助手，用简洁明了的语言回答用户的问题。"
+
+# 默认LLM配置
+DEFAULT_MODEL = "doubao-seed-1-8-251228"
+DEFAULT_TEMPERATURE = 0.7
+DEFAULT_MAX_TOKENS = 500
+
+# 合法的目光方向和嘴巴状态
+VALID_DIRECTIONS = ["center", "up", "down", "left", "right",
+                    "upleft", "upright", "downleft", "downright"]
+VALID_MOUTH_STATES = ["open", "close"]
+
+
+def parse_response_format(response: str, enable_live2d: bool = False) -> dict:
     """
-    处理单个消息
-    """
-    global langgraph_manager
-    if langgraph_manager:
-        # 直接打印消息信息
-        print(f"处理单个消息: {json.dumps(message_data, ensure_ascii=False)}")
+    解析大模型响应中的语气、内容、目光方向和嘴巴状态。
 
-        # 创建LLM状态
-        initial_state = LLMState(
-            messages=[message_data],
-            system_prompt="你是一个友好的AI助手，用简洁明了的语言回答用户的问题。",
-            model="doubao-seed-1-8-251228",
-            temperature=0.7,
-            max_tokens=500
-        )
-
-        # 运行图
-        print("运行LangGraph处理消息")
-        await langgraph_manager.run_with_messages(initial_state)
-
-# Bilibili 状态集成节点
-def bilibili_state_integration_node(state: LLMState) -> LLMState:
-    """
-    Bilibili 状态集成节点
-
-    从 Bilibili 子状态中提取重要和相关的数据，并将其加载到主状态中
+    响应格式：【语气】内容|目光方向|嘴巴状态
 
     Args:
-        state: 主状态
+        response: 大模型生成的原始响应
+        enable_live2d: 是否启用Live2D（影响是否解析动作信息）
 
     Returns:
-        更新后的主状态
+        包含 tone, content, visual_focus, mouth_state 的字典
     """
-    import logging
-    import datetime
+    result = {
+        "tone": "普通",
+        "content": response,
+        "visual_focus": "center",
+        "mouth_state": "close"
+    }
 
-    logger = logging.getLogger("bilibili_state_integration_node")
-    logger.info("执行 Bilibili 状态集成节点")
+    if not response or not response.startswith("【"):
+        return result
 
-    try:
-        # 由于我们使用了独立的哔哩哔哩直播监听程序，这里不再需要内部处理
-        # 监听程序会通过HTTP请求发送处理后的弹幕数据到我们的服务器
+    end_bracket = response.find("】")
+    if end_bracket == -1:
+        logger.warning("无效的格式，缺少结束括号】")
+        return result
 
-        return state
+    # 提取语气
+    extracted_tone = response[1:end_bracket]
+    if extracted_tone in ALLOWED_TONES:
+        result["tone"] = extracted_tone
 
-    except Exception as e:
-        logger.error(f"Bilibili 状态集成节点失败: {e}")
-        import traceback
-        traceback.print_exc()
-        return state
+    # 提取剩余部分
+    rest = response[end_bracket + 1:].strip()
+    parts = rest.split("|")
+    result["content"] = parts[0].strip()
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+    # 只有启用Live2D时才解析动作信息
+    if not enable_live2d:
+        return result
+
+    # 解析目光方向
+    if len(parts) > 1:
+        direction = parts[1].strip().lower()
+        if direction in VALID_DIRECTIONS:
+            result["visual_focus"] = direction
+
+    # 解析嘴巴状态
+    if len(parts) > 2:
+        mouth = parts[2].strip().lower()
+        if mouth in VALID_MOUTH_STATES:
+            result["mouth_state"] = mouth
+
+    return result
+
+
+def create_default_llm_state(messages=None) -> LLMState:
+    """创建默认的LLM状态"""
+    return LLMState(
+        messages=messages or [],
+        system_prompt=SYSTEM_PROMPT_DEFAULT,
+        model=DEFAULT_MODEL,
+        temperature=DEFAULT_TEMPERATURE,
+        max_tokens=DEFAULT_MAX_TOKENS
+    )
+
+
+def _extract_last_user_message(state):
+    """从状态中提取最后一条用户消息"""
+    for msg in reversed(state.get("messages", [])):
+        if msg.get("role") == "user":
+            return msg
+    return None
+
 
 class LangGraphManager:
     """
@@ -378,51 +473,28 @@ class LangGraphManager:
         logger.info("LangGraph 图结构构建完成")
 
     def _rag_retrieval_node(self, state: LLMState) -> LLMState:
-        """
-        RAG 检索节点
-
-        Args:
-            state: LLM状态
-
-        Returns:
-            更新后的LLM状态
-        """
+        """RAG 检索节点：从 Milvus 检索相关上下文"""
         logger.info("执行 RAG 检索节点")
 
         try:
-            # 提取用户消息
-            user_message = None
-            for msg in reversed(state.get("messages", [])):
-                if msg.get("role") == "user":
-                    user_message = msg
-                    break
-
+            user_message = _extract_last_user_message(state)
             if not user_message:
                 logger.warning("未找到用户消息，跳过 RAG 检索")
                 return state
 
-            # 构建 RAG 状态
             rag_state = RAGState(
                 query_text=user_message.get("content", ""),
                 collection_name="chat_history",
                 db_name="LLM_vtuber",
-                query_params={
-                    "top_k": 3,
-                    "metric_type": "COSINE",
-                    "nprobe": 10
-                },
+                query_params={"top_k": 3, "metric_type": "COSINE", "nprobe": 10},
                 messages=state.get("messages", [])
             )
 
-            # 执行 RAG 检索
             rag_result = rag_retrieval_node(rag_state)
 
-            # 更新状态
             state["context"] = rag_result.get("context")
             state["retrieved_documents"] = rag_result.get("retrieved_documents")
-
             logger.info(f"RAG 检索完成，找到 {rag_result.get('num_documents', 0)} 个文档")
-
             return state
 
         except Exception as e:
@@ -430,102 +502,37 @@ class LangGraphManager:
             return state
 
     def _llm_process_node(self, state: LLMState) -> LLMState:
-        """
-        LLM 处理节点
-
-        Args:
-            state: LLM状态
-
-        Returns:
-            更新后的LLM状态
-        """
+        """LLM 处理节点：调用大模型生成响应并解析格式"""
         logger.info("执行 LLM 处理节点")
 
         try:
-            # 提取用户消息
-            user_message = None
-            for msg in reversed(state.get("messages", [])):
-                if msg.get("role") == "user":
-                    user_message = msg
-                    break
-
+            user_message = _extract_last_user_message(state)
             if not user_message:
                 logger.warning("未找到用户消息，跳过 LLM 处理")
                 return state
 
-            # 构建 LLM 状态
-            system_prompt = """
-你是一位由Live2D技术驱动的AI虚拟主播，名叫爱莉希雅。
+            # 根据是否启用Live2D选择系统提示词：
+            # - 启用Live2D时使用带【语气】|目光|嘴巴 格式约束的提示词
+            # - 未启用时使用普通提示词，LLM不会输出动作信息
+            system_prompt = (
+                SYSTEM_PROMPT_LIVE2D if self.enable_live2d else SYSTEM_PROMPT_DEFAULT
+            )
 
-## 角色设定
-- **身份**: 活泼可爱的二次元虚拟主播，拥有粉色长发和灵动的大眼睛
-- **性格**: 元气满满、俏皮可爱、温柔体贴，偶尔会有点小调皮
-- **说话风格**: 使用可爱的口语化表达，适当加入语气词和表情符号
-- **口头禅**: 喜欢用"~"、"呢"、"呀"等结尾，让回答更有亲和力
-
-## 直播互动规则
-- 时刻保持热情友好的态度，让观众感受到温暖和快乐
-- 回答要简洁明快，适合语音合成播放
-- 可以适当加入一些主播常用的互动话术
-- 保持积极向上的氛围
-
-## 回答格式要求
-请在回答时使用以下格式输出：
-【语气】回答内容|目光方向|嘴巴状态
-
-其中：
-1. 语气必须从以下列表中选择：
-   扮演慌张、调皮、尴尬、感动、积极、急了、假装、惊喜、开心、撩拨、难过、普通、撒娇、生气、严肃、疑问、自言
-
-2. 目光方向必须从以下选项中选择一个（不要总是选center，要多样化选择）：
-   center、up、down、left、right、upleft、upright、downleft、downright
-
-3. 嘴巴状态必须为以下之一：
-   open（张开嘴巴，说话时）、close（闭合嘴巴，安静思考时）
-
-## 目光方向选择指南（重要！）
-目光方向要多样化，**不要总是选择center**！按照以下优先级选择：
-
-**内容相关方向（优先）**：
-- 提到"上面/天上/高/天空/飞"相关内容 → up
-- 提到"下面/地下/低/地面/地板"相关内容 → down
-- 提到"左边/左/左侧"相关内容 → left
-- 提到"右边/右/右侧"相关内容 → right
-- 提到"左上/右上/左下/右下"等对角方向 → 对应方向
-
-**情绪动作（可选）**：
-- 开心/惊喜/撩拨时 → 可选 up/center
-- 调皮/撒娇时 → 可选 left/right
-- 疑问/思考时 → 可选 up/down
-- 生气/难过时 → 可选 down
-
-**默认规则**：如果内容没有明确的方向提示，优先选择 up/down/left/right 中的一个，而不是 center！
-
-**建议分布**：center 占比不超过 30%，其他方向占比 70%
-
-## 嘴巴状态选择
-- 说话中 → open
-- 句子结束、停顿、思考 → close
-"""
-
+            # 构建LLM状态
             llm_state = LLMState(
                 messages=state.get("messages", []),
                 system_prompt=system_prompt,
-                model="doubao-seed-1-8-251228",
-                temperature=0.7,
-                max_tokens=500,
+                model=DEFAULT_MODEL,
+                temperature=DEFAULT_TEMPERATURE,
+                max_tokens=DEFAULT_MAX_TOKENS,
                 question=user_message.get("content", ""),
                 context=state.get("context"),
                 name=user_message.get("name")
             )
 
-            # 执行 LLM 处理
-            if state.get("context"):
-                # 有上下文时使用上下文感知的问答节点
-                llm_result = context_aware_qa_node(llm_state)
-            else:
-                # 无上下文时使用普通聊天节点
-                llm_result = llm_chat_node(llm_state)
+            # 根据是否有上下文选择不同节点
+            llm_result = (context_aware_qa_node(llm_state) if state.get("context")
+                          else llm_chat_node(llm_state))
 
             # 更新状态
             response = llm_result.get("response", "")
@@ -533,62 +540,18 @@ class LangGraphManager:
             state["messages"] = llm_result.get("messages", state.get("messages", []))
             state["error"] = llm_result.get("error")
 
-            # 解析语气和内容（基础格式：【语气】内容）
-            tone = "普通"
-            content = response
-            visual_focus = "center"
-            mouth_state = "close"
+            # 使用提取的解析函数（消除嵌套）
+            parsed = parse_response_format(response, enable_live2d=self.enable_live2d)
+            state["tone"] = parsed["tone"]
+            state["content"] = parsed["content"]
+            state["visual_focus"] = parsed["visual_focus"]
+            state["mouth_state"] = parsed["mouth_state"]
 
-            # 判断是否启用Live2D（直接从LangGraphManager实例中读取，而不是从state中读取）
-            enable_live2d = self.enable_live2d
-            logger.info(f"LLM节点读取: enable_live2d={enable_live2d}")
-
-            if response.startswith("【"):
-                # 查找第一个"】"来分离语气和内容
-                end_bracket = response.find("】")
-                if end_bracket != -1:
-                    extracted_tone = response[1:end_bracket]
-                    # 验证语气是否在允许列表中
-                    if extracted_tone in ALLOWED_TONES:
-                        tone = extracted_tone
-                    
-                    # 提取剩余部分
-                    rest = response[end_bracket+1:].strip()
-                    
-                    # 查找"|"分隔符（用于动作信息）
-                    parts = rest.split("|")
-                    content = parts[0].strip()
-                    
-                    # 只有启用Live2D时才解析动作信息
-                    if enable_live2d and len(parts) > 1:
-                        # 解析目光方向
-                        direction = parts[1].strip().lower()
-                        valid_directions = ["center", "up", "down", "left", "right", 
-                                          "upleft", "upright", "downleft", "downright"]
-                        if direction in valid_directions:
-                            visual_focus = direction
-                        
-                        # 解析嘴巴状态
-                        if len(parts) > 2:
-                            mouth = parts[2].strip().lower()
-                            if mouth in ["open", "close"]:
-                                mouth_state = mouth
-                    else:
-                        # 未启用Live2D时，设置默认动作
-                        visual_focus = "center"
-                        mouth_state = "close"
-                else:
-                    logger.warning("无效的格式，缺少结束括号】")
-            
-            state["tone"] = tone
-            state["content"] = content
-            state["visual_focus"] = visual_focus
-            state["mouth_state"] = mouth_state
-            
-            if enable_live2d:
-                logger.info(f"LLM 处理完成，语气: {tone}, 目光: {visual_focus}, 嘴巴: {mouth_state}")
+            logger.info(f"LLM节点读取: enable_live2d={self.enable_live2d}")
+            if self.enable_live2d:
+                logger.info(f"LLM 处理完成，语气: {parsed['tone']}, 目光: {parsed['visual_focus']}, 嘴巴: {parsed['mouth_state']}")
             else:
-                logger.info(f"LLM 处理完成，语气: {tone} (Live2D未启用)")
+                logger.info(f"LLM 处理完成，语气: {parsed['tone']} (Live2D未启用)")
 
             return state
 
@@ -643,118 +606,8 @@ class LangGraphManager:
             return state
 
     async def run_with_messages(self, initial_state: LLMState = None):
-        """
-        运行图处理消息
-
-        Args:
-            initial_state: 初始状态
-
-        Returns:
-            最终状态
-        """
+        """运行图处理消息（合并了原run_with_messages和run两个重复方法）"""
         logger.info("开始运行 LangGraph 处理消息")
-        print("开始运行 LangGraph 处理消息")
-
-        global args
-        if not self.graph:
-            self.build_graph(enable_tts=args.tts if args else False)
-
-        # 如果没有初始状态，创建一个
-        if not initial_state:
-            initial_state = LLMState(
-                messages=[],
-                system_prompt="你是一个友好的AI助手，用简洁明了的语言回答用户的问题。",
-                model="doubao-seed-1-8-251228",
-                temperature=0.7,
-                max_tokens=500
-            )
-
-        # 打印初始状态
-        print(f"初始状态: {json.dumps(initial_state, ensure_ascii=False)}")
-
-        # 运行图（使用异步调用）
-        print("调用graph.ainvoke")
-        result = await self.graph.ainvoke(
-            initial_state,
-            config={
-                "recursion_limit": 10,  # 增加递归限制
-                "configurable": {
-                    "thread_id": f"thread_{uuid.uuid4()}",
-                    "checkpoint_id": f"session_{uuid.uuid4()}"
-                }
-            }
-        )
-
-        # 打印结果
-        print(f"运行结果: {json.dumps(result, ensure_ascii=False)}")
-
-        logger.info("LangGraph 运行完成")
-        print("LangGraph 运行完成")
-        return result
-
-    def _init_node(self, state: LLMState) -> LLMState:
-        """
-        初始化节点
-
-        Args:
-            state: LLM状态
-
-        Returns:
-            初始化后的LLM状态
-        """
-        logger.info("执行初始化节点")
-
-        # 设置Live2D启用标志
-        state["enable_live2d"] = self.enable_live2d
-        logger.info(f"初始化节点: enable_live2d={self.enable_live2d}, state中的值={state.get('enable_live2d', 'NOT_SET')}")
-
-        # 确保状态中包含必要的字段
-        if not state.get("system_prompt"):
-            state["system_prompt"] = "你是一个友好的AI助手，用简洁明了的语言回答用户的问题。"
-
-        if not state.get("model"):
-            state["model"] = "doubao-seed-1-8-251228"
-
-        if not state.get("temperature"):
-            state["temperature"] = 0.7
-
-        if not state.get("max_tokens"):
-            state["max_tokens"] = 500
-
-        if not state.get("messages"):
-            state["messages"] = []
-
-        return state
-
-    def _finalize_node(self, state: LLMState) -> LLMState:
-        """
-        最终处理节点
-
-        Args:
-            state: LLM状态
-
-        Returns:
-            最终处理后的LLM状态
-        """
-        logger.info("执行最终处理节点")
-
-        # 在这里可以添加最终处理逻辑
-        # 例如：保存状态、清理资源等
-
-        return state
-
-    async def run(self, initial_state: LLMState = None, max_steps: int = 10):
-        """
-        运行图
-
-        Args:
-            initial_state: 初始状态
-            max_steps: 最大执行步数
-
-        Returns:
-            最终状态
-        """
-        logger.info("开始运行 LangGraph")
 
         global args
         if not self.graph:
@@ -763,21 +616,16 @@ class LangGraphManager:
                 enable_live2d=args.live2d if args else False
             )
 
-        # 如果没有初始状态，创建一个
         if not initial_state:
-            initial_state = LLMState(
-                messages=[],
-                system_prompt="你是一个友好的AI助手，用简洁明了的语言回答用户的问题。",
-                model="doubao-seed-1-8-251228",
-                temperature=0.7,
-                max_tokens=500
-            )
+            initial_state = create_default_llm_state()
 
-        # 运行图（使用异步调用）
+        logger.info(f"初始状态: {json.dumps(initial_state, ensure_ascii=False)}")
+        logger.info("调用graph.ainvoke")
+
         result = await self.graph.ainvoke(
             initial_state,
             config={
-                "recursion_limit": 10,  # 增加递归限制
+                "recursion_limit": 10,
                 "configurable": {
                     "thread_id": f"thread_{uuid.uuid4()}",
                     "checkpoint_id": f"session_{uuid.uuid4()}"
@@ -785,16 +633,33 @@ class LangGraphManager:
             }
         )
 
+        logger.info(f"运行结果: {json.dumps(result, ensure_ascii=False)}")
         logger.info("LangGraph 运行完成")
         return result
 
-    async def handle_new_danmaku(self, danmaku_data):
-        """
-        处理新弹幕
+    def _init_node(self, state: LLMState) -> LLMState:
+        """初始化节点：设置默认字段和Live2D标志"""
+        logger.info("执行初始化节点")
 
-        Args:
-            danmaku_data: 弹幕数据
-        """
+        state["enable_live2d"] = self.enable_live2d
+        logger.info(f"初始化节点: enable_live2d={self.enable_live2d}")
+
+        # 使用常量设置默认值
+        state.setdefault("system_prompt", SYSTEM_PROMPT_DEFAULT)
+        state.setdefault("model", DEFAULT_MODEL)
+        state.setdefault("temperature", DEFAULT_TEMPERATURE)
+        state.setdefault("max_tokens", DEFAULT_MAX_TOKENS)
+        state.setdefault("messages", [])
+
+        return state
+
+    def _finalize_node(self, state: LLMState) -> LLMState:
+        """最终处理节点"""
+        logger.info("执行最终处理节点")
+        return state
+
+    async def handle_new_danmaku(self, danmaku_data):
+        """处理新弹幕"""
         if self.processing_danmaku:
             return
 
@@ -802,62 +667,34 @@ class LangGraphManager:
             self.processing_danmaku = True
             logger.info(f"处理新弹幕: {danmaku_data['content']}")
 
-            # 创建初始LLM状态
-            initial_state = LLMState(
-                messages=[{
-                    "role": "user",
-                    "content": f"用户 {danmaku_data['user']['uname']} 说: {danmaku_data['content']}",
-                    "name": danmaku_data['user']['uname']
-                }],
-                system_prompt="你是一个友好的AI助手，用简洁明了的语言回答用户的问题。",
-                model="doubao-seed-1-8-251228",
-                temperature=0.7,
-                max_tokens=500
-            )
+            initial_state = create_default_llm_state(messages=[{
+                "role": "user",
+                "content": f"用户 {danmaku_data['user']['uname']} 说: {danmaku_data['content']}",
+                "name": danmaku_data['user']['uname']
+            }])
 
-            # 直接调用run_with_messages处理消息
             result = await self.run_with_messages(initial_state)
 
-            # 打印结果
-            logger.info("弹幕处理结果:")
-            if result['messages']:
+            if result.get('messages'):
                 last_message = result['messages'][-1]
                 logger.info(f"AI 回复: {last_message['content'][:100]}...")
 
         except Exception as e:
             logger.error(f"处理新弹幕时发生错误: {e}")
-            import traceback
-            traceback.print_exc()
         finally:
             self.processing_danmaku = False
 
     def stream(self, initial_state: LLMState = None):
-        """
-        流式运行图
-
-        Args:
-            initial_state: 初始状态
-
-        Yields:
-            每一步的状态
-        """
+        """流式运行图"""
         logger.info("开始流式运行 LangGraph")
 
         global args
         if not self.graph:
             self.build_graph(enable_tts=args.tts if args else False)
 
-        # 如果没有初始状态，创建一个
         if not initial_state:
-            initial_state = LLMState(
-                messages=[],
-                system_prompt="你是一个友好的AI助手，用简洁明了的语言回答用户的问题。",
-                model="doubao-seed-1-8-251228",
-                temperature=0.7,
-                max_tokens=500
-            )
+            initial_state = create_default_llm_state()
 
-        # 流式运行图
         for chunk in self.graph.stream(
             initial_state,
             config={
@@ -872,15 +709,8 @@ class LangGraphManager:
         logger.info("LangGraph 流式运行完成")
 
     async def start_danmaku_listener(self):
-        """
-        启动弹幕监听器
-
-        一直监听，直到用户主动关闭
-        """
+        """启动弹幕监听器（占位，实际监听由独立程序完成）"""
         logger.info("启动弹幕监听器，开始持续监听直播间弹幕")
-
-        # 由于我们使用了独立的哔哩哔哩直播监听程序，这里不再需要内部监听
-        # 监听程序会通过HTTP请求发送弹幕数据到我们的服务器
         while True:
             await asyncio.sleep(1)
 
@@ -906,27 +736,31 @@ async def start_http_server(port=8081):
     await site.start()
 
     logger.info(f"HTTP服务器已启动，监听端口 {port}")
-    print(f"HTTP服务器已启动，监听端口 {port}")
 
     return runner
 
 def start_bilibili_listener(room_id=None):
     """
-    启动哔哩哔哩直播监听程序
+    启动哔哩哔哩直播监听程序（使用 bili_main.py 常驻监听，替换原 sample.py 仅5秒演示）
+
+    bili_main.py 特性：
+    - 自动读取 config.json 的 ROOM_IDS / output_port
+    - 连接断开自动指数退避重连
+    - 弹幕/礼物/SC 去重后 HTTP POST 到主程序 (127.0.0.1:<output_port>/)
 
     Args:
-        room_id: 直播间号
+        room_id: 直播间号；若指定则写入 config.json 覆盖默认
     """
     import subprocess
     import sys
 
-    # 构建命令
-    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "broadcast", "sample.py")
+    broadcast_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "broadcast")
+    script_path = os.path.join(broadcast_dir, "bili_main.py")
     cmd = [sys.executable, script_path]
 
     # 如果指定了房间号，修改config.json
-    if room_id:
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "broadcast", "config.json")
+    if room_id is not None:
+        config_path = os.path.join(broadcast_dir, "config.json")
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
@@ -937,9 +771,17 @@ def start_bilibili_listener(room_id=None):
         except Exception as e:
             logger.error(f"更新直播间号失败: {e}")
 
-    # 启动监听程序
-    logger.info("启动哔哩哔哩直播监听程序")
-    subprocess.Popen(cmd, cwd=os.path.dirname(script_path))
+    # 启动监听程序（子进程）
+    logger.info(f"启动哔哩哔哩直播监听程序: {' '.join(cmd)}  cwd={broadcast_dir}")
+    try:
+        subprocess.Popen(
+            cmd,
+            cwd=broadcast_dir,
+            stdout=None,   # 继承父进程stdout（用户能看到弹幕打印）
+            stderr=None,
+        )
+    except Exception as e:
+        logger.error(f"启动弹幕监听器失败: {e}")
 
 def main():
     """
@@ -998,13 +840,10 @@ def main():
 
                 if connected:
                     logger.info("Live2D 控制器连接成功")
-                    print("Live2D: ✓ 已连接")
                 else:
                     logger.warning("Live2D 控制器连接失败")
-                    print("Live2D: ✗ 连接失败")
             except Exception as e:
                 logger.error(f"Live2D 控制器初始化失败: {e}")
-                print(f"Live2D: ✗ 初始化失败 - {e}")
                 live2d_manager = None
 
         # 创建 LangGraph 管理器
@@ -1020,13 +859,17 @@ def main():
         # 启动HTTP服务器
         runner = await start_http_server()
 
+        # 初始化消息队列并启动 worker（串行处理弹幕，避免 Live2D/TTS 并发冲突）
+        global _message_queue, _queue_worker_task
+        _message_queue = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+        _queue_worker_task = asyncio.create_task(_queue_worker())
+
         # 启动哔哩哔哩直播监听程序
         start_bilibili_listener(args.room_id)
 
         try:
             # 持续运行
             logger.info("主程序已启动，等待请求...")
-            print("主程序已启动，等待请求...")
             while True:
                 await asyncio.sleep(1)
         except KeyboardInterrupt:
@@ -1036,6 +879,15 @@ def main():
             import traceback
             traceback.print_exc()
         finally:
+            # 取消队列 worker
+            if _queue_worker_task and not _queue_worker_task.done():
+                _queue_worker_task.cancel()
+                try:
+                    await _queue_worker_task
+                except asyncio.CancelledError:
+                    pass
+                logger.info("消息队列 worker 已停止")
+
             # 关闭 Live2D 连接
             if live2d_manager:
                 await live2d_manager.disconnect()

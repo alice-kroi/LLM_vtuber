@@ -7,7 +7,7 @@ import sys
 import os
 import asyncio
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 async def test_full_graph_with_tts():
     """测试完整的图流程，包括 TTS 节点"""

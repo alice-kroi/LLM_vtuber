@@ -19,7 +19,6 @@ from typing import Optional, Dict, List, Union, Any
 import logging
 import time
 import uuid
-import json
 import os
 
 # 导入 Milvus 相关模块
@@ -59,11 +58,14 @@ class MemoryNode:
     """
     记忆节点类，用于处理大模型回答的持久化存储
     """
-    
+
+    # 嵌入向量维度（与 Milvus 集合定义一致）
+    VECTOR_DIM = 2560
+
     def __init__(self, **kwargs):
         """
         初始化记忆节点（使用连接复用）
-        
+
         Args:
             **kwargs: 配置参数
                 - uri: Milvus 服务地址
@@ -153,13 +155,11 @@ class MemoryNode:
             response_vector = self.embedding_model.embed_query(response)
             
             # 检查并调整向量维度
-            # 注意：根据实际集合定义的向量维度进行调整
-            vector_dim = 2560  # 从 create_database.py 中获取的维度
-            if len(response_vector) != vector_dim:
-                if len(response_vector) >= vector_dim:
-                    response_vector = response_vector[:vector_dim]
+            if len(response_vector) != self.VECTOR_DIM:
+                if len(response_vector) >= self.VECTOR_DIM:
+                    response_vector = response_vector[:self.VECTOR_DIM]
                 else:
-                    response_vector = response_vector + [0.0] * (vector_dim - len(response_vector))
+                    response_vector = response_vector + [0.0] * (self.VECTOR_DIM - len(response_vector))
             
             # 格式化时间戳
             timestamp_str = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())

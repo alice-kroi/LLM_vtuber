@@ -1,1034 +1,917 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Live2D 模型控制程序
+Live2D 模型控制程序（优化版 v2）
 
-根据 design.md 文件的需求实现：
-1. 连接 live2d 模型
-2. 控制模型运动
-   2.0：程序实际上的原理是持续发送动作参数，下面的指令都是把对应参数的变化量一起整合进去实现的
-   2.1：模型应该有个常态的大型不规则运行
-   2.2：模型应该可以根据指令，往特定上下左右中等9个方向看去的动作
-   2.3：模型应该选择张嘴和关闭
+核心改进（相比 v1）:
+  1. 修复 move() 帧计时 bug：v1 中 next_tick 计算错误导致只发 2 帧（起止），
+     表现为"瞬间跳到一边"。v2 用帧索引精确对齐 50FPS。
+  2. 统一 WebSocket 串行化：v1 中 idle_movement 的可视化 get_tracking_parameters
+     在锁外调用，与 move 的 inject 争抢同一 WebSocket 导致
+     "cannot call recv while another coroutine is already running recv"。
+     v2 移除 idle 中的 get_tracking，所有 WS 操作都在 operation_lock 下。
+  3. 消除参数映射混乱：v1 中 core_params 存 mapped 值 [-1,1]，
+     DIRECTION_TEMPLATES 也是 mapped 值，但 inject 时 unmap 成实际度数。
+     idle 用 core_params(mapped) 覆盖时会和 move 的目标不一致。
+     v2 中 core_params 和 DIRECTION_TEMPLATES 都直接存实际值（度数），
+     inject 直接用，无需 map/unmap。
+  4. 增大呼吸幅度：v1 的 0.08 太小（VTS 显示波动为 0），v2 改为 0.3，
+     让动作结束后模型仍有可见的生命感（解决"突然停住"）。
+  5. ease-in-out cubic 缓动 + 多频正弦呼吸 + 动作间微抖动。
 """
 
 import asyncio
-import random
-import noise
+import math
 import time
 import sys
 import os
 import argparse
+import logging
+import random
 
-# 添加项目根目录到sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from live2d.vtuber_studio_info import VTubeStudioAPI
 
+logger = logging.getLogger("Live2DMain")
+
+# ---------------------------------------------------------------------------
+# 常量配置
+# ---------------------------------------------------------------------------
+
+# 方向模板：直接使用实际值（度数/位移），避免 map/unmap 转换混乱
+# FaceAngleX/Y/Z 单位为度，典型范围 [-30, 30]
+# FacePositionX/Y 为归一化位移，典型范围 [-1, 1]
+# 注：D方案（极限版），基础方向约占VTS可动范围的40%，呼吸+微调叠加后动作明显有表现力
+DIRECTION_TEMPLATES = {
+    "center":    {"FaceAngleX":   0.0, "FaceAngleY":   0.0, "FaceAngleZ":   0.0, "FacePositionX":   0.0,  "FacePositionY":   0.0},
+    "up":        {"FaceAngleX":   0.0, "FaceAngleY":  12.0, "FaceAngleZ":   0.0, "FacePositionX":   0.0,  "FacePositionY":  0.18},
+    "down":      {"FaceAngleX":   0.0, "FaceAngleY": -12.0, "FaceAngleZ":   0.0, "FacePositionX":   0.0,  "FacePositionY": -0.18},
+    "left":      {"FaceAngleX": -10.5, "FaceAngleY":   0.0, "FaceAngleZ":   4.5, "FacePositionX": -0.18, "FacePositionY":   0.0},
+    "right":     {"FaceAngleX":  10.5, "FaceAngleY":   0.0, "FaceAngleZ":  -4.5, "FacePositionX":  0.18, "FacePositionY":   0.0},
+    "upleft":    {"FaceAngleX":  -7.5, "FaceAngleY":   7.5, "FaceAngleZ":   3.3, "FacePositionX": -0.135, "FacePositionY":  0.135},
+    "upright":   {"FaceAngleX":   7.5, "FaceAngleY":   7.5, "FaceAngleZ":  -3.3, "FacePositionX":  0.135, "FacePositionY":  0.135},
+    "downleft":  {"FaceAngleX":  -7.5, "FaceAngleY":  -7.5, "FaceAngleZ":   3.3, "FacePositionX": -0.135, "FacePositionY": -0.135},
+    "downright": {"FaceAngleX":   7.5, "FaceAngleY":  -7.5, "FaceAngleZ":  -3.3, "FacePositionX":  0.135, "FacePositionY": -0.135},
+}
+VALID_DIRECTIONS = list(DIRECTION_TEMPLATES.keys())
+
+# 动作帧率（每秒下发参数次数）
+_MOVE_FPS = 50
+_MOVE_STEP_SEC = 1.0 / _MOVE_FPS
+
+# 嘴巴平滑过渡时长 (秒)
+# v1=0.15 太短，开合太突然；D方案动作整体3秒，嘴巴0.5秒配合整体节奏
+_MOUTH_TRANSITION_SEC = 0.5
+
+# 呼吸晃动：多频正弦叠加 (权重, 周期秒, 相位)
+_BREATH_LAYERS = (
+    (0.50, 9.0, 0.0),
+    (0.30, 14.0, 1.3),
+    (0.20, 23.0, 2.7),
+)
+# 呼吸幅度：D方案修正版（降低后避免净位移被呼吸掩盖）
+# - 角度 ±6° ≈ FaceAngleY=12° 模板的 50%（净位移12°与呼吸±6°能清晰区分）
+# - 位移 ±0.50 ≈ 总范围±1的50%
+_BREATH_ANGLE_AMP = 6.0      # 角度参数呼吸幅度（度）
+_BREATH_POSITION_AMP = 0.50  # 位移参数呼吸幅度
+# 动作过程中的微抖动幅度（约为呼吸幅度的一半，且被 α 衰减在首尾）
+_IRREGULAR_ANGLE_AMP = 3.0
+_IRREGULAR_POSITION_AMP = 0.25
+
+# idle 段低频注视点漂移：打破呼吸正弦极值点的"静止感"
+# 周期 7-17s（短于呼吸9-23s，确保在短idle段5-8s内完成半个周期以上）
+# 幅度 3° ≈ 呼吸的 1/2，角速度 3*2π/7 ≈ 2.7°/s，在极值点提供持续微移
+_DRIFT_LAYERS = (
+    (0.45, 7.0, 0.3),
+    (0.35, 11.0, 2.1),
+    (0.20, 17.0, 4.5),
+)
+_DRIFT_ANGLE_AMP = 3.0      # 漂移角度幅度（度）— 约为呼吸的 1/2
+_DRIFT_POSITION_AMP = 0.20  # 漂移位移幅度
+
+# 呼吸各参数的缩放系数（让不同参数晃动幅度不同，避免机械同步）
+_BREATH_PARAM_SCALE = {
+    "FaceAngleX": 0.8,
+    "FaceAngleY": 1.0,
+    "FaceAngleZ": 0.5,
+    "FacePositionX": 0.4,
+    "FacePositionY": 1.2,
+}
+
+# move 段中段呼吸衰减系数：呼吸角速度峰值(10.8°/s)与缓动速度(6.8°/s)同量级，
+# 衰减到 40% 后呼吸角速度降到 4.3°/s，不再主导净位移方向，消除忽快忽慢
+_MOVE_BREATH_ATTENUATION = 0.4
+# move 段微抖动衰减系数：微抖动角速度(22.7°/s)是缓动速度(11°/s)的 2 倍，
+# 衰减到 20% 后角速度降到 4.5°/s，不再干扰缓动方向
+_MOVE_IRR_ATTENUATION = 0.2
+
+
+# ---------------------------------------------------------------------------
+# 缓动函数
+# ---------------------------------------------------------------------------
+
+def _ease_in_out_sine(t: float) -> float:
+    """正弦缓入缓出：全程速度变化更柔和，没有 cubic 中段的冲感。
+    适合用于角色姿态切换，避免"嗖地一下到位"的机械感。
+    """
+    if t <= 0.0:
+        return 0.0
+    if t >= 1.0:
+        return 1.0
+    return -(math.cos(math.pi * t) - 1.0) * 0.5
+
+
+# ---------------------------------------------------------------------------
+# Live2DMain 核心控制器
+# ---------------------------------------------------------------------------
+
 class Live2DMain:
     """Live2D 模型控制主类"""
-    
+
     def __init__(self, host="localhost", port=8001):
-        """初始化控制器
-        
-        参数:
-            host (str): VTube Studio服务器主机名
-            port (int): VTube Studio服务器端口
-        """
         self.api = VTubeStudioAPI(host=host, port=port)
         self.running = False
-        self.current_direction = "downleft"  # 当前朝向：center, up, down, left, right, upleft, upright, downleft, downright
-        self.mouth_open = False  # 嘴巴是否张开
-        self.t = 0  # 时间变量，用于生成随机运动
-        self.visualizer = None  # 参数可视化器
-        self.param_ranges = {}  # 存储参数的最大最小值和默认值
-        self.param_mappings = {}  # 存储参数的映射信息
-        self.core_params = {}  # 核心参数，存储当前状态
-        self.start_time = 0  # 开始时间，用于常态晃动
-        
-        # 指令队列（用于接收外部指令）
-        self.command_queue = asyncio.Queue()
-        # 全局操作锁（确保只有一个操作在进行，防止WebSocket并发冲突）
-        self.operation_lock = asyncio.Lock()
-        # 是否正在执行指令
-        self.executing_command = False
-    
+
+        # 当前方向和嘴巴状态
+        self.current_direction = "center"
+        self._mouth_target_open = 0.0   # 目标嘴巴开合度 [0,1]
+        self._mouth_current_open = 0.0  # 当前（平滑过渡中）嘴巴开合度
+
+        # 核心参数：存储实际值（度数/位移原值），inject 时直接用
+        self.core_params: dict[str, float] = {}
+
+        # 参数映射信息（保留用于 map/unmap 兼容，但核心逻辑不再使用）
+        self.param_ranges: dict[str, dict] = {}
+
+        # 启动时间，用于呼吸晃动计时
+        self.start_time = 0.0
+
+        # 参数可视化器（可选，默认不启用以避免 WS 争抢）
+        self.visualizer = None
+
+        # 指令队列
+        self.command_queue: asyncio.Queue = asyncio.Queue()
+
+        # 全局操作锁：所有 WebSocket 操作必须持锁，避免 send/recv 交错
+        # VTubeStudioAPI.send_request 内部 send+recv 非原子，并发会报
+        # "cannot call recv while another coroutine is already running recv"
+        self.operation_lock: asyncio.Lock = asyncio.Lock()
+
+        # 嘴巴参数名缓存
+        self._cached_mouth_param: str | None = None
+
+        # 参数日志（运行时记录所有 inject 的参数值，用于诊断分析）
+        # 通过环境变量 LIVE2D_PARAM_LOG=1 启用
+        self._param_log_file = None
+        self._param_log_path = None
+        if os.environ.get("LIVE2D_PARAM_LOG"):
+            self._enable_param_log()
+
+    # ------------------------------------------------------------------
+    # 参数映射（保留兼容，核心逻辑不再使用）
+    # ------------------------------------------------------------------
+
     def map_parameter(self, param_name, value):
-        """
-        将参数值映射到标准范围
-        
-        参数:
-            param_name (str): 参数名称
-            value (float): 参数值
-            
-        返回:
-            float: 映射后的值
-        """
         if param_name not in self.param_ranges:
             return value
-        
-        # 获取参数范围
-        min_val = self.param_ranges[param_name]["min"]
-        max_val = self.param_ranges[param_name]["max"]
-        default_val = self.param_ranges[param_name]["default"]
-        
-        # 确定映射类型
-        if default_val == min_val or default_val == max_val:
-            # 1.2.1: 默认值与最大或最小值相同，映射到0-1
-            if default_val == min_val:
-                # 默认值是最小值，映射到0
-                if max_val == min_val:
-                    return 0
-                return (value - min_val) / (max_val - min_val)
-            else:
-                # 默认值是最大值，映射到1
-                if max_val == min_val:
-                    return 1
-                return 1 - (value - min_val) / (max_val - min_val)
-        else:
-            # 1.2.2: 默认值在中间，映射到-1~1
-            if max_val == min_val:
+        r = self.param_ranges[param_name]
+        min_v, max_v, default_v = r["min"], r["max"], r["default"]
+        if max_v == min_v:
+            if default_v == min_v:
                 return 0
-            return 2 * (value - min_val) / (max_val - min_val) - 1
-    
+            if default_v == max_v:
+                return 1
+            return 0
+        if default_v == min_v:
+            return (value - min_v) / (max_v - min_v)
+        if default_v == max_v:
+            return 1 - (value - min_v) / (max_v - min_v)
+        return 2 * (value - min_v) / (max_v - min_v) - 1
+
     def unmap_parameter(self, param_name, mapped_value):
-        """
-        将映射值反映射到实际参数范围
-        
-        参数:
-            param_name (str): 参数名称
-            mapped_value (float): 映射后的值
-            
-        返回:
-            float: 反映射后的值
-        """
         if param_name not in self.param_ranges:
             return mapped_value
-        
-        # 获取参数范围
-        min_val = self.param_ranges[param_name]["min"]
-        max_val = self.param_ranges[param_name]["max"]
-        default_val = self.param_ranges[param_name]["default"]
-        
-        # 确定映射类型
-        if default_val == min_val or default_val == max_val:
-            # 1.2.1: 映射到0-1
-            if default_val == min_val:
-                # 默认值是最小值，映射到0
-                return min_val + mapped_value * (max_val - min_val)
+        r = self.param_ranges[param_name]
+        min_v, max_v, default_v = r["min"], r["max"], r["default"]
+        if max_v == min_v:
+            return min_v
+        if default_v == min_v:
+            return min_v + mapped_value * (max_v - min_v)
+        if default_v == max_v:
+            return max_v - mapped_value * (max_v - min_v)
+        return min_v + (mapped_value + 1) * (max_v - min_v) / 2
+
+    # ------------------------------------------------------------------
+    # 呼吸/抖动
+    # ------------------------------------------------------------------
+
+    def _breath_contribution(self, t_rel: float) -> float:
+        """返回 [-1,1] 的自然呼吸值（多频正弦叠加）。"""
+        total = 0.0
+        for w, period, phase in _BREATH_LAYERS:
+            total += w * math.sin(2.0 * math.pi * t_rel / period + phase)
+        return total
+
+    def _breath_param_dict(self, elapsed: float) -> dict[str, float]:
+        """根据当前时间返回每个 Face 参数的呼吸偏移值（实际值单位）。
+
+        按参数类型使用不同幅度：角度参数用 _BREATH_ANGLE_AMP，
+        位移参数用 _BREATH_POSITION_AMP，确保两类参数都有可见波动。
+        """
+        base = self._breath_contribution(elapsed)  # [-1, 1]
+        result = {}
+        for pname, scale in _BREATH_PARAM_SCALE.items():
+            if "Position" in pname:
+                result[pname] = base * scale * _BREATH_POSITION_AMP
             else:
-                # 默认值是最大值，映射到1
-                return max_val - mapped_value * (max_val - min_val)
+                result[pname] = base * scale * _BREATH_ANGLE_AMP
+        return result
+
+    def _irregular_param_dict(self, elapsed: float) -> dict[str, float]:
+        """动作过程中的微抖动（高频、低幅），同样按参数类型区分幅度。"""
+        v1 = math.sin(2.0 * math.pi * elapsed / 0.83)
+        v2 = math.sin(2.0 * math.pi * elapsed / 1.37 + 0.9)
+        return {
+            "FaceAngleX": v1 * _IRREGULAR_ANGLE_AMP,
+            "FaceAngleY": v2 * _IRREGULAR_ANGLE_AMP,
+            "FaceAngleZ": v1 * 0.5 * _IRREGULAR_ANGLE_AMP,
+            "FacePositionX": v2 * 0.3 * _IRREGULAR_POSITION_AMP,
+            "FacePositionY": v1 * 0.3 * _IRREGULAR_POSITION_AMP,
+        }
+
+    def _drift_contribution(self, elapsed: float) -> float:
+        """idle 段低频漂移：多频正弦叠加，周期 11-29s，输出 [-1, 1]。
+        与呼吸(9-23s)频段接近但相位不同，在呼吸极值点提供持续微移。
+        """
+        total = 0.0
+        for w, period, phase in _DRIFT_LAYERS:
+            t_rel = elapsed % period
+            total += w * math.sin(2.0 * math.pi * t_rel / period + phase)
+        return total
+
+    def _drift_param_dict(self, elapsed: float) -> dict[str, float]:
+        """返回每个 Face 参数的漂移偏移值（实际值单位）。"""
+        base = self._drift_contribution(elapsed)
+        result = {}
+        for pname, scale in _BREATH_PARAM_SCALE.items():
+            if "Position" in pname:
+                result[pname] = base * scale * _DRIFT_POSITION_AMP
+            else:
+                result[pname] = base * scale * _DRIFT_ANGLE_AMP
+        return result
+
+    # ------------------------------------------------------------------
+    # 核心参数初始化与 WebSocket 下发
+    # ------------------------------------------------------------------
+
+    def _ensure_core_params(self) -> None:
+        """初始化 core_params 为所有参数的默认实际值。"""
+        if self.core_params:
+            return
+        for pname, pr in self.param_ranges.items():
+            self.core_params[pname] = pr["default"]
+
+    def _enable_param_log(self) -> None:
+        """启用参数日志记录，写入 CSV 文件。"""
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        self._param_log_path = os.path.join(log_dir, f"live2d_params_{int(time.time())}.csv")
+        self._param_log_file = open(self._param_log_path, "w", encoding="utf-8")
+        self._param_log_file.write("timestamp,elapsed_sec,source,FaceAngleX,FaceAngleY,FaceAngleZ,FacePositionX,FacePositionY,MouthOpen\n")
+        self._param_log_t0 = time.perf_counter()
+        logger.info(f"参数日志已启用: {self._param_log_path}")
+
+    def _log_params(self, items: list[tuple[str, float]], source: str = "") -> None:
+        """将参数值写入日志文件（如果已启用）。"""
+        if not self._param_log_file:
+            return
+        d = {name: val for name, val in items}
+        # 查找嘴巴参数
+        mouth_val = ""
+        mouth_param = self._cached_mouth_param
+        if mouth_param and mouth_param in d:
+            pr = self.param_ranges.get(mouth_param, {})
+            m_min = pr.get("min", 0)
+            m_max = pr.get("max", 1)
+            if m_max > m_min:
+                mouth_val = f"{(d[mouth_param] - m_min) / (m_max - m_min):.4f}"
+        elapsed = time.perf_counter() - self._param_log_t0
+        # 安全格式化：参数不存在时留空
+        def _fmt(key):
+            v = d.get(key)
+            return f"{v:.4f}" if v is not None else ""
+        self._param_log_file.write(
+            f"{time.time():.3f},{elapsed:.4f},{source},"
+            f"{_fmt('FaceAngleX')},{_fmt('FaceAngleY')},"
+            f"{_fmt('FaceAngleZ')},{_fmt('FacePositionX')},"
+            f"{_fmt('FacePositionY')},{mouth_val}\n"
+        )
+        self._param_log_file.flush()
+
+    async def _inject_params(self, items: list[tuple[str, float]], source: str = "") -> None:
+        """直接用实际值下发参数到 VTube Studio（不经过 map/unmap）。
+
+        调用者必须持有 operation_lock。
+        """
+        self._log_params(items, source)
+        parameter_values = [{"id": name, "value": val} for name, val in items]
+        await self.inject_parameter_data(parameter_values, face_found=True, mode="set")
+
+    # ------------------------------------------------------------------
+    # 移动（缓动插值 + 呼吸相位锚定衔接 + 微抖动）
+    # ------------------------------------------------------------------
+
+    async def move(self, target_params: dict, duration: float = 2.5, direction: str = "",
+                   commit_params: dict | None = None) -> None:
+        """
+        从当前核心参数平滑移动到目标参数。
+
+        关键改进（v6, 解决起步冲量+忽快忽慢）:
+          1. 缓动: 0.3*ease_out_cubic + 0.7*linear。
+             降低 cubic 占比(原0.6)，起步斜率从 2.2x 降到 1.6x，
+             减少起步冲量；中段 90% 近似匀速，消除忽快忽慢。
+          2. 呼吸相位锚定: move 首尾帧把"自身呼吸"与"前/后段 idle 呼吸"
+             通过 α 渐变融合，段与段衔接处不会出现 3-5° 的瞬时跳变。
+          3. move 中段呼吸衰减到 40%: 呼吸角速度峰值(10.8°/s)与缓动速度(6.8°/s)
+             同量级会干扰净位移方向，衰减后不再主导，消除"帧15→20 从11°/s突降到0.76°/s"。
+          4. 取消 move_final 单独帧: 最后一帧(progress=1.0)在循环内直接发送。
+          5. commit_params (新增, v6): 动作完成后 core_params 更新为 commit_params，
+             而非 target_params。当同方向随机微调时，让 core_params 回落到纯净的
+             方向模板值，避免下一次同方向微调时"越来越歪"。
+
+        参数:
+            commit_params: None = 使用 target_params 提交，否则用这个 dict 提交。
+        """
+        self._ensure_core_params()
+
+        start_time = time.perf_counter()
+        start_params = {p: self.core_params.get(p, 0.0) for p in target_params}
+        deltas = {p: target_params[p] - start_params[p] for p in target_params}
+        src_label = direction or "unknown"
+
+        # idle 期间的呼吸基线（用 move 启动瞬间的呼吸相位锚定首尾衔接）
+        t_abs_start = time.time() - self.start_time
+        idle_breath_start = self._breath_param_dict(t_abs_start)
+        # move 结束瞬间预期的 idle 呼吸相位（用于末尾锚定落位）
+        t_abs_end = t_abs_start + duration
+        idle_breath_end = self._breath_param_dict(t_abs_end)
+
+        # 总帧数 + 预留末尾最终帧
+        total_frames = int(duration * _MOVE_FPS) + 1  # 例如 3*50+1 = 151 帧
+        blend_width = max(6, int(total_frames * 0.15))  # 首尾各 15% 做呼吸锚定渐变
+
+        async with self.operation_lock:
+            for frame_index in range(total_frames):
+                # 精确对齐帧时间（避免 time.perf_counter 抖动导致丢帧/重复帧）
+                target_tick = start_time + frame_index * _MOVE_STEP_SEC
+                # 本帧缓动进度 [0, 1]，最后一帧强制为 1.0（确保精准落位）
+                if frame_index == total_frames - 1:
+                    progress_raw = 1.0
+                else:
+                    # 用 time.perf_counter() 的真实位置计算，但钳制到 [0, 1]
+                    now = time.perf_counter()
+                    progress_raw = max(0.0, min(1.0, (now - start_time) / duration))
+
+                # 混合缓动: 30% ease_out_cubic + 70% linear
+                # v6: 降低 cubic 占比(0.6→0.3)，起步斜率从 2.2x 降到 1.6x，
+                # 减少起步冲量；中段 90% 近似匀速，消除忽快忽慢
+                def _blend_ease(t: float) -> float:
+                    if t <= 0.0: return 0.0
+                    if t >= 1.0: return 1.0
+                    # ease_out_cubic: 1 - (1-t)^3
+                    cubic = 1.0 - (1.0 - t) ** 3
+                    return 0.3 * cubic + 0.7 * t
+                progress = _blend_ease(progress_raw)
+
+                # --- 呼吸偏移锚定 ---
+                breath_move = self._breath_param_dict(time.time() - self.start_time)
+                irr = self._irregular_param_dict(progress_raw * duration)
+
+                # blend α: 0=完全用idle锚定呼吸(衔接段), 1=完全用move自身呼吸
+                if frame_index < blend_width:
+                    # 开头 blend_width 帧: α 从 0 → 1 (从前段 idle 呼吸平滑切入)
+                    alpha = frame_index / blend_width
+                elif frame_index >= total_frames - blend_width:
+                    # 结尾 blend_width 帧: α 从 1 → 0 (平滑切回后段 idle 呼吸)
+                    alpha = (total_frames - 1 - frame_index) / blend_width
+                else:
+                    alpha = 1.0
+
+                # 线性插值: 首尾两端分别锚定到 idle_breath_start / idle_breath_end
+                # 起点侧: (1-α)*idle_breath_start + α*breath_move
+                # 终点侧: 同步向 idle_breath_end 靠拢
+                t_rel_end = progress_raw  # 0→1
+                t_rel_start = 1.0 - progress_raw
+
+                items: list[tuple[str, float]] = []
+                for pname in target_params:
+                    base = start_params[pname] + deltas[pname] * progress
+                    bm = breath_move.get(pname, 0.0)
+                    bs = idle_breath_start.get(pname, 0.0)
+                    be = idle_breath_end.get(pname, 0.0)
+                    # v6: move 中段呼吸衰减到 40%，避免呼吸角速度(10.8°/s)
+                    # 干扰缓动方向(6.8°/s)导致忽快忽慢；首尾保持 100% 与 idle 衔接
+                    move_breath = bm * _MOVE_BREATH_ATTENUATION
+                    blended_breath = (
+                        (1 - alpha) * (t_rel_start * bs + t_rel_end * be)
+                        + alpha * move_breath
+                    )
+                    # 微抖动仅在中段 α≈1 时生效，首尾衔接时抑制
+                    # v6: 中段额外衰减到 20%，角速度从 22.7→4.5°/s，不再干扰缓动方向
+                    blended_irr = irr.get(pname, 0.0) * alpha * _MOVE_IRR_ATTENUATION
+                    total = base + blended_breath + blended_irr
+                    items.append((pname, total))
+
+                # 最后一帧: source 标记为 move_final（保持CSV兼容性）
+                if frame_index == total_frames - 1:
+                    src = f"move_final:{src_label}"
+                else:
+                    src = f"move:{src_label}"
+                await self._inject_params(items, source=src)
+
+                # 精确睡到下一帧
+                sleep_s = target_tick - time.perf_counter()
+                if sleep_s > 0:
+                    await asyncio.sleep(sleep_s)
+                else:
+                    await asyncio.sleep(0)
+
+            # 到达终点：更新核心参数
+            # 若指定了 commit_params（同方向微调场景），则用模板值回退，避免微调累积"越来越歪"；
+            # 否则用 target_params（跨方向场景）。
+            if commit_params is not None:
+                for pname, v in commit_params.items():
+                    self.core_params[pname] = v
+            else:
+                for pname, v in target_params.items():
+                    self.core_params[pname] = v
+
+        logger.debug(f"移动完成，耗时 {duration:.2f}s，发送 {total_frames} 帧")
+
+    # ------------------------------------------------------------------
+    # 方向移动（高层 API）
+    # ------------------------------------------------------------------
+
+    async def move_to_direction(self, direction: str, duration: float = 2.5) -> bool:
+        if direction not in DIRECTION_TEMPLATES:
+            logger.warning(f"无效方向: {direction}  (有效值: {VALID_DIRECTIONS})")
+            return False
+        base_target = dict(DIRECTION_TEMPLATES[direction])  # 纯净模板（始终作为commit基准）
+        target_params = dict(base_target)
+        commit_params: dict | None = None  # None = 直接用 target_params 提交
+
+        # 方向与当前相同时，添加随机微调，避免 delta=0 无可见动作
+        # v6修正:
+        # 1. 微调幅度加大到 ±20° / ±0.35（跨方向模板约±12°，微调换方向感更强）
+        # 2. 按实际最大绝对位移量计算 duration，保持 ~10°/s 目标速度，
+        #    与跨方向速度保持一致
+        # 3. move 结束后 commit_params 回落到纯净 base_target，不累积微调，
+        #    避免 N 次同方向后 AX/AY "越来越歪"
+        if direction == self.current_direction:
+            tweak_angle_amp = 20.0
+            tweak_pos_amp = 0.35
+            # 记录本次微调值，用于日志和计算实际速度匹配
+            tweaks: dict[str, float] = {}
+            max_abs_delta_deg = 0.0
+            for pname in target_params:
+                if "Angle" in pname:
+                    tw = random.uniform(-tweak_angle_amp, tweak_angle_amp)
+                    target_params[pname] += tw
+                    # 实际位移量 = 微调值 (因为 start_params≈base_target 同方向)
+                    if abs(tw) > max_abs_delta_deg:
+                        max_abs_delta_deg = abs(tw)
+                    tweaks[pname] = tw
+                elif "Position" in pname:
+                    tw = random.uniform(-tweak_pos_amp, tweak_pos_amp)
+                    target_params[pname] += tw
+                    tweaks[pname] = tw
+            # 目标速度：~10°/s（与跨方向 Δ≈25°/2.5s ≈10°/s 一致）
+            TARGET_SPEED_DEG_S = 10.0
+            TARGET_SPEED_POS_S = 0.20  # 位移维度同步约 0.2/s
+            # 用最大 delta 估算时长，保持速度一致
+            if max_abs_delta_deg > 0.01:
+                auto_duration = max_abs_delta_deg / TARGET_SPEED_DEG_S
+            else:
+                auto_duration = 2.0
+            # 夹在合理范围：至少 1.2s（避免太快），最多 3.0s
+            duration = max(1.2, min(3.0, auto_duration))
+            commit_params = base_target
+            # 打印本次各参数微调详情，便于日志验证不累积
+            tweak_str = ", ".join(f"{k}={v:+.1f}" for k, v in tweaks.items()
+                                  if "Angle" in k and abs(v) > 0.5)
+            logger.info(
+                f"方向相同({direction})，添加随机微调 [{tweak_str}]，"
+                f"调整时长={duration:.2f}s (目标速度~{TARGET_SPEED_DEG_S:.0f}°/s)"
+            )
+
+        await self.move(target_params, duration, direction=direction,
+                        commit_params=commit_params)
+        self.current_direction = direction
+        logger.info(f"已移动到方向: {direction}")
+        return True
+
+    # ------------------------------------------------------------------
+    # 嘴巴状态（平滑过渡）
+    # ------------------------------------------------------------------
+
+    async def set_mouth_state(self, open_state: float | bool) -> bool:
+        """
+        设置嘴巴开合度，150ms 内平滑过渡避免突兀。
+        整个过渡持有 operation_lock。
+        """
+        if isinstance(open_state, bool):
+            target = 1.0 if open_state else 0.0
         else:
-            # 1.2.2: 映射到-1~1
-            return min_val + (mapped_value + 1) * (max_val - min_val) / 2
-    
-    def get_irregular_shake(self, current_time, duration=2):
-        """
-        获取不规则晃动值
-        
-        参数:
-            current_time (float): 当前时间
-            duration (float): 晃动持续时间
-            
-        返回:
-            float: 晃动值，范围在-1到1之间
-        """
-        import math
-        
-        # 计算当前时间在周期中的位置
-        # 默认为2倍周期，所以总周期是duration
-        t = current_time % duration
-        
-        # 使用正弦函数生成晃动，范围在-1到1之间
-        # 2倍周期，所以使用2*pi
-        return math.sin(2 * math.pi * t / duration)
-    
-    def get_irregular_shake_dict(self, current_time, duration=2):
-        """
-        获取不规则晃动的参数字典
-        
-        参数:
-            current_time (float): 当前时间
-            duration (float): 晃动持续时间
-            
-        返回:
-            dict: 晃动参数字典
-        """
-        shake_value = self.get_irregular_shake(current_time, duration)
-        
-        # 生成晃动参数字典
-        # 这里只处理面部角度和位置参数
-        shake_params = {
-            "FaceAngleX": shake_value * 0.2,  # 上下晃动
-            "FaceAngleY": shake_value * 0.2,  # 左右晃动
-            "FaceAngleZ": shake_value * 0.1,  # 左右倾斜
-            "FacePositionX": shake_value * 0.1,  # 左右移动
-            "FacePositionY": shake_value * 0.1   # 上下移动
-        }
-        
-        return shake_params
-    
-    def get_normal_shake(self, current_time):
-        """
-        获取常态晃动值
-        
-        参数:
-            current_time (float): 当前时间
-            
-        返回:
-            float: 晃动值，范围在-1到1之间
-        """
-        import math
-        
-        # 使用正弦函数生成常态晃动，范围在-1到1之间
-        # 周期为10秒，使晃动更加自然
-        return math.sin(2 * math.pi * current_time / 10)
-    
-    def get_normal_shake_dict(self, current_time):
-        """
-        获取常态晃动的参数字典
-        
-        参数:
-            current_time (float): 当前时间
-            
-        返回:
-            dict: 晃动参数字典
-        """
-        shake_value = self.get_normal_shake(current_time)
-        
-        # 生成晃动参数字典
-        # 这里只处理面部角度和位置参数
-        shake_params = {
-            "FaceAngleX": shake_value * 0.1,  # 上下晃动
-            "FaceAngleY": shake_value * 0.1,  # 左右晃动
-            "FaceAngleZ": shake_value * 0.05,  # 左右倾斜
-            "FacePositionX": shake_value * 0.05,  # 左右移动
-            "FacePositionY": shake_value * 0.05   # 上下移动
-        }
-        
-        return shake_params
-    
-    async def move(self, target_params, duration=1):
-        """
-        移动功能
-        
-        参数:
-            target_params (dict): 目标参数字典，值为映射后的值
-            duration (float): 移动持续时间（秒）
-        """
-        import time
-        
-        # 记录开始时间
-        start_time = time.time()
-        
-        # 确保核心参数已初始化
-        if not self.core_params:
-            # 初始化核心参数为默认值
-            for param_name in self.param_ranges:
-                default_val = self.param_ranges[param_name]["default"]
-                self.core_params[param_name] = self.map_parameter(param_name, default_val)
-        
-        # 计算参数差值
-        param_diff = {}
-        for param_name, target_value in target_params.items():
-            if param_name in self.core_params:
-                param_diff[param_name] = target_value - self.core_params[param_name]
-            else:
-                # 如果核心参数中没有该参数，初始化为0
-                self.core_params[param_name] = 0
-                param_diff[param_name] = target_value
-        
-        # 执行移动过程
-        while True:
-            current_time = time.time()
-            elapsed_time = current_time - start_time
-            
-            # 检查是否到达目标时间
-            if elapsed_time >= duration:
-                break
-            
-            # 计算当前进度（0到1之间）
-            progress = elapsed_time / duration
-            
-            # 计算当前参数值
-            current_params = {}
-            for param_name, diff in param_diff.items():
-                # 核心数值 + 差值 * 进度 + 不规则晃动 + 常态晃动
-                base_value = self.core_params.get(param_name, 0) + diff * progress
-                
-                # 添加不规则晃动
-                irregular_shake = self.get_irregular_shake_dict(elapsed_time).get(param_name, 0)
-                
-                # 添加常态晃动
-                normal_shake = self.get_normal_shake_dict(current_time - self.start_time).get(param_name, 0)
-                
-                # 计算最终值
-                current_params[param_name] = base_value + irregular_shake + normal_shake
-            
-            # 反映射参数并发送
-            parameter_values = []
-            for param_name, mapped_value in current_params.items():
-                actual_value = self.unmap_parameter(param_name, mapped_value)
-                parameter_values.append({"id": param_name, "value": actual_value})
-            
-            # 发送参数数据
-            await self.inject_parameter_data(parameter_values, face_found=True, mode="set")
-            
-            # 等待一小段时间
-            await asyncio.sleep(0.1)
-        
-        # 移动完成后，更新核心参数
-        for param_name, target_value in target_params.items():
-            self.core_params[param_name] = target_value
-        
-        # 发送最终参数值（包含常态晃动）
-        final_params = {}
-        current_time = time.time()
-        for param_name, target_value in target_params.items():
-            # 目标值 + 常态晃动
-            normal_shake = self.get_normal_shake_dict(current_time - self.start_time).get(param_name, 0)
-            final_params[param_name] = target_value + normal_shake
-        
-        # 反映射并发送最终参数
-        parameter_values = []
-        for param_name, mapped_value in final_params.items():
-            actual_value = self.unmap_parameter(param_name, mapped_value)
-            parameter_values.append({"id": param_name, "value": actual_value})
-        
-        await self.inject_parameter_data(parameter_values, face_found=True, mode="set")
-        
-        print(f"移动完成，耗时 {duration} 秒")
-    
-    async def update_non_moving_state(self, current_time):
-        """
-        非移动状态处理
-        
-        参数:
-            current_time (float): 当前时间
-        """
-        # 确保核心参数已初始化
-        if not self.core_params:
-            # 初始化核心参数为默认值
-            for param_name in self.param_ranges:
-                default_val = self.param_ranges[param_name]["default"]
-                self.core_params[param_name] = self.map_parameter(param_name, default_val)
-        
-        # 计算当前参数值（核心参数 + 常态晃动）
-        current_params = {}
-        for param_name, core_value in self.core_params.items():
-            # 核心值 + 常态晃动
-            normal_shake = self.get_normal_shake_dict(current_time - self.start_time).get(param_name, 0)
-            current_params[param_name] = core_value + normal_shake
-        
-        # 反映射参数并发送
-        parameter_values = []
-        for param_name, mapped_value in current_params.items():
-            actual_value = self.unmap_parameter(param_name, mapped_value)
-            parameter_values.append({"id": param_name, "value": actual_value})
-        
-        # 发送参数数据
-        await self.inject_parameter_data(parameter_values, face_found=True, mode="set")
-    
-    async def move_to_direction(self, direction, duration=1):
-        """
-        移动到指定方向
-        
-        参数:
-            direction (str): 方向，可选值：center, up, down, left, right, upleft, upright, downleft, downright
-            duration (float): 移动持续时间（秒）
-        """
-        # 定义方向模板（符合3D标准坐标系）
-        # X轴: 水平方向（左右）
-        # Y轴: 垂直方向（上下）
-        # Z轴: 垂直于XY平面（深度/倾斜）
-        direction_templates = {
-            "center": {
-                "FaceAngleX": 0,      # X轴旋转（水平方向）
-                "FaceAngleY": 0,      # Y轴旋转（垂直方向）
-                "FaceAngleZ": 0,      # Z轴旋转（深度倾斜）
-                "FacePositionX": 0,   # X轴位置（水平移动）
-                "FacePositionY": 0    # Y轴位置（垂直移动）
-            },
-            "up": {
-                "FaceAngleX": 0,      # X轴：无水平旋转
-                "FaceAngleY": 0.5,    # Y轴：向上旋转（抬头）
-                "FaceAngleZ": 0,      # Z轴：无深度倾斜
-                "FacePositionX": 0,   # X轴：无水平移动
-                "FacePositionY": 0.2  # Y轴：向上移动
-            },
-            "down": {
-                "FaceAngleX": 0,       # X轴：无水平旋转
-                "FaceAngleY": -0.5,    # Y轴：向下旋转（低头）
-                "FaceAngleZ": 0,       # Z轴：无深度倾斜
-                "FacePositionX": 0,    # X轴：无水平移动
-                "FacePositionY": -0.2  # Y轴：向下移动
-            },
-            "left": {
-                "FaceAngleX": -0.5,    # X轴：向左旋转（左转头）
-                "FaceAngleY": 0,       # Y轴：无垂直旋转
-                "FaceAngleZ": -0.3,    # Z轴：向左倾斜（左歪头）
-                "FacePositionX": -0.2, # X轴：向左移动
-                "FacePositionY": 0     # Y轴：无垂直移动
-            },
-            "right": {
-                "FaceAngleX": 0.5,     # X轴：向右旋转（右转头）
-                "FaceAngleY": 0,       # Y轴：无垂直旋转
-                "FaceAngleZ": 0.3,     # Z轴：向右倾斜（右歪头）
-                "FacePositionX": 0.2,  # X轴：向右移动
-                "FacePositionY": 0     # Y轴：无垂直移动
-            },
-            "upleft": {
-                "FaceAngleX": -0.4,    # X轴：向左旋转
-                "FaceAngleY": 0.4,     # Y轴：向上旋转
-                "FaceAngleZ": -0.2,    # Z轴：向左倾斜
-                "FacePositionX": -0.15, # X轴：向左移动
-                "FacePositionY": 0.15  # Y轴：向上移动
-            },
-            "upright": {
-                "FaceAngleX": 0.4,      # X轴：向右旋转
-                "FaceAngleY": 0.4,     # Y轴：向上旋转
-                "FaceAngleZ": 0.2,      # Z轴：向右倾斜
-                "FacePositionX": 0.15,  # X轴：向右移动
-                "FacePositionY": 0.15   # Y轴：向上移动
-            },
-            "downleft": {
-                "FaceAngleX": -0.4,     # X轴：向左旋转
-                "FaceAngleY": -0.4,     # Y轴：向下旋转
-                "FaceAngleZ": -0.2,     # Z轴：向左倾斜
-                "FacePositionX": -0.15,  # X轴：向左移动
-                "FacePositionY": -0.15   # Y轴：向下移动
-            },
-            "downright": {
-                "FaceAngleX": 0.4,       # X轴：向右旋转
-                "FaceAngleY": -0.4,      # Y轴：向下旋转
-                "FaceAngleZ": 0.2,       # Z轴：向右倾斜
-                "FacePositionX": 0.15,   # X轴：向右移动
-                "FacePositionY": -0.15   # Y轴：向下移动
-            }
-        }
-        
-        # 检查方向是否有效
-        if direction not in direction_templates:
-            print(f"无效的方向: {direction}")
+            target = max(0.0, min(1.0, float(open_state)))
+
+        self._mouth_target_open = target
+
+        mouth_param = self._resolve_mouth_param()
+        if mouth_param is None:
+            logger.warning("未找到嘴巴参数，无法设置嘴巴状态")
             return False
-        
-        # 获取方向模板
-        target_params = direction_templates[direction]
-        
-        # 设置执行标志，防止与常态运动冲突
-        self.executing_command = True
-        try:
-            # 执行移动（持有锁防止并发冲突）
-            async with self.operation_lock:
-                await self.move(target_params, duration)
-        finally:
-            # 清除执行标志
-            self.executing_command = False
-        
-        # 更新当前方向
-        self.current_direction = direction
-        
-        print(f"已移动到方向: {direction}")
-        return True
-    
-    async def connect(self):
-        """连接到VTube Studio服务器"""
-        return await self.api.connect()
-    
-    async def initialize(self):
-        """统一初始化方法"""
-        print("开始初始化...")
-        
-        # 获取参数范围
-        if not await self.get_parameter_ranges():
-            print("初始化失败：无法获取参数范围")
-            return False
-        
-        # 初始化核心参数
-        if not self.core_params:
-            # 初始化核心参数为默认值
-            for param_name in self.param_ranges:
-                default_val = self.param_ranges[param_name]["default"]
-                self.core_params[param_name] = self.map_parameter(param_name, default_val)
-            print(f"核心参数初始化完成，共 {len(self.core_params)} 个参数")
-        
-        # 初始化开始时间
-        self.start_time = time.time()
-        
-        print("初始化完成")
-        return True
-    
-    async def login(self, plugin_name="Live2DMain", plugin_developer="Developer"):
-        """登录到VTube Studio服务器
-        
-        参数:
-            plugin_name (str): 插件名称
-            plugin_developer (str): 开发者名称
-        """
-        # 请求认证令牌
-        if not await self.api.request_auth_token(plugin_name, plugin_developer):
-            print("请求认证令牌失败")
-            return False
-        
-        # 进行认证
-        if not await self.api.authenticate(plugin_name, plugin_developer):
-            print("认证失败")
-            return False
-        
-        print("登录成功")
-        return True
-    
-    async def disconnect(self):
-        """断开与VTube Studio服务器的连接"""
-        await self.api.disconnect()
-    
-    async def get_parameter_ranges(self):
-        """获取模型参数的最大最小值和默认值"""
-        try:
-            response = await self.api.get_tracking_parameters()
-            if response and "data" in response:
-                data = response["data"]
-                
-                # 获取默认参数的范围和默认值
-                if "defaultParameters" in data:
-                    for param in data["defaultParameters"]:
-                        param_name = param.get("name")
-                        if param_name:
-                            self.param_ranges[param_name] = {
-                                "min": param.get("min", 0),
-                                "max": param.get("max", 0),
-                                "default": param.get("defaultValue", 0)
-                            }
-                
-                # 获取自定义参数的范围和默认值
-                if "customParameters" in data:
-                    for param in data["customParameters"]:
-                        param_name = param.get("name")
-                        if param_name:
-                            self.param_ranges[param_name] = {
-                                "min": param.get("min", 0),
-                                "max": param.get("max", 0),
-                                "default": param.get("defaultValue", 0)
-                            }
-                
-                print(f"获取到 {len(self.param_ranges)} 个参数的范围和默认值")
-                return True
-            else:
-                print("获取参数范围失败: 响应数据无效")
-                return False
-        except Exception as e:
-            print(f"获取参数范围失败: {e}")
-            return False
-    
-    async def set_direction(self, direction):
-        """设置模型朝向
-        
-        参数:
-            direction (str): 朝向方向，可选值：center, up, down, left, right, upleft, upright, downleft, downright
-        """
-        valid_directions = ["center", "up", "down", "left", "right", "upleft", "upright", "downleft", "downright"]
-        if direction not in valid_directions:
-            print(f"无效的方向: {direction}，请使用以下方向之一: {valid_directions}")
-            return False
-        
-        self.current_direction = direction
-        print(f"模型朝向已设置为: {direction}")
-        return True
-    
-    async def set_mouth_state(self, open_state):
-        """设置嘴巴状态
-        
-        参数:
-            open_state (bool): True表示张嘴，False表示闭嘴
-        """
-        # 设置执行标志，防止与常态运动冲突
-        self.executing_command = True
-        try:
-            self.mouth_open = open_state
-            
-            # 立即发送嘴巴参数到 VTube Studio
-            # 根据嘴巴状态设置参数值
-            mouth_value = 1.0 if open_state else 0.0
-            
-            # 尝试查找嘴巴参数
-            mouth_param_name = None
-            for param_name in self.param_ranges.keys():
-                if "mouth" in param_name.lower() or "嘴" in param_name:
-                    mouth_param_name = param_name
+
+        # 获取嘴巴参数的实际范围，用于把 [0,1] 开合度映射到实际值
+        pr = self.param_ranges.get(mouth_param, {})
+        m_min = pr.get("min", 0)
+        m_max = pr.get("max", 1)
+        # 开合度 0→m_min, 1→m_max
+        def _open_to_actual(o: float) -> float:
+            return m_min + o * (m_max - m_min)
+
+        start_open = self._mouth_current_open
+        start_t = time.perf_counter()
+
+        async with self.operation_lock:
+            while True:
+                elapsed = time.perf_counter() - start_t
+                if elapsed >= _MOUTH_TRANSITION_SEC:
                     break
-            
-            if mouth_param_name:
-                # 映射参数值
-                mapped_value = self.map_parameter(mouth_param_name, mouth_value)
-                actual_value = self.unmap_parameter(mouth_param_name, mapped_value)
-                
-                # 发送参数数据
-                parameter_values = [{"id": mouth_param_name, "value": actual_value}]
-                await self.inject_parameter_data(parameter_values, face_found=True, mode="set")
-                print(f"已发送嘴巴参数: {mouth_param_name} = {actual_value}")
-            else:
-                print(f"警告: 未找到嘴巴参数，嘴巴状态可能不会变化")
-            
-            print(f"嘴巴状态已设置为: {'张开' if open_state else '关闭'}")
-        finally:
-            # 清除执行标志
-            self.executing_command = False
-        
+                t_p = elapsed / _MOUTH_TRANSITION_SEC
+                self._mouth_current_open = start_open + (target - start_open) * t_p
+                await self._inject_params([(mouth_param, _open_to_actual(self._mouth_current_open))], source="mouth_transition")
+                await asyncio.sleep(min(_MOVE_STEP_SEC, _MOUTH_TRANSITION_SEC - elapsed))
+
+            # 落位
+            self._mouth_current_open = target
+            # 同步到 core_params，防止 idle 循环用旧值覆盖嘴巴状态
+            self.core_params[mouth_param] = _open_to_actual(target)
+            await self._inject_params([(mouth_param, _open_to_actual(target))], source="mouth_final")
+
+        state_name = "张开" if target >= 0.5 else "闭合"
+        logger.info(f"嘴巴状态已设置为: {state_name} (mouth={self._mouth_current_open:.2f})")
         return True
-    
-    async def inject_parameter_data(self, parameter_values, face_found=True, mode="set"):
-        """注入参数数据到VTube Studio
-        
-        参数:
-            parameter_values (list): 参数值列表，每个元素为字典，包含id和value
-            face_found (bool): 是否找到人脸
-            mode (str): 模式，可选值：set, add, multiply
+
+    def _resolve_mouth_param(self) -> str | None:
+        """查找嘴巴参数名，并做缓存。"""
+        if self._cached_mouth_param and self._cached_mouth_param in self.param_ranges:
+            return self._cached_mouth_param
+        for pname in self.param_ranges.keys():
+            low = pname.lower()
+            if "mouth" in low or "嘴" in pname:
+                self._cached_mouth_param = pname
+                return pname
+        return None
+
+    # ------------------------------------------------------------------
+    # 空闲状态（呼吸维持循环）
+    # ------------------------------------------------------------------
+
+    async def update_non_moving_state(self, current_time: float) -> None:
+        """下发 core_params + 呼吸 + 漂移，维持生命感。调用者需持锁。
+
+        只注入 Face 相关参数 + 嘴巴参数（共 ~6 个），而非全部 127 个参数，
+        避免 WebSocket 往返过慢导致 FPS 下降。
+
+        v6 改进：叠加低频漂移(_drift)，打破呼吸正弦极值点的 ~1.5s 静止感。
         """
+        self._ensure_core_params()
+        elapsed = current_time - self.start_time
+        breath = self._breath_param_dict(elapsed)
+        drift = self._drift_param_dict(elapsed)
+
+        items: list[tuple[str, float]] = []
+        # 只注入 Face 参数（带呼吸 + 漂移）+ 嘴巴参数
+        for pname, scale in _BREATH_PARAM_SCALE.items():
+            core = self.core_params.get(pname, 0.0)
+            items.append((pname, core + breath.get(pname, 0.0) + drift.get(pname, 0.0)))
+
+        # 嘴巴参数（保持当前开合度，不叠加呼吸）
+        mouth_param = self._resolve_mouth_param()
+        if mouth_param and mouth_param in self.core_params:
+            items.append((mouth_param, self.core_params[mouth_param]))
+
+        await self._inject_params(items, source=f"idle:{self.current_direction}")
+
+    # ------------------------------------------------------------------
+    # 连接/登录/初始化/断开
+    # ------------------------------------------------------------------
+
+    async def connect(self):
+        return await self.api.connect()
+
+    async def disconnect(self):
+        await self.api.disconnect()
+
+    async def login(self, plugin_name="Live2DMain", plugin_developer="Developer"):
+        if not await self.api.request_auth_token(plugin_name, plugin_developer):
+            logger.error("请求认证令牌失败")
+            return False
+        if not await self.api.authenticate(plugin_name, plugin_developer):
+            logger.error("认证失败")
+            return False
+        logger.info("登录成功")
+        return True
+
+    async def initialize(self) -> bool:
+        logger.info("开始初始化 Live2D 参数...")
+        if not await self.get_parameter_ranges():
+            logger.error("初始化失败: 无法获取参数范围")
+            return False
+        self._ensure_core_params()
+        logger.info(f"核心参数初始化完成，共 {len(self.core_params)} 个参数")
+        self.start_time = time.time()
+        await self.set_mouth_state(False)
+        logger.info("初始化完成")
+        return True
+
+    async def get_parameter_ranges(self) -> bool:
         try:
-            # 构建请求数据
+            # 获取参数范围也需要持锁，避免与 inject 并发
+            async with self.operation_lock:
+                resp = await self.api.get_tracking_parameters()
+            if not resp or "data" not in resp:
+                logger.error("获取参数范围失败: 响应数据无效")
+                return False
+            data = resp["data"]
+            for key in ("defaultParameters", "customParameters"):
+                for p in data.get(key, []):
+                    pname = p.get("name")
+                    if not pname:
+                        continue
+                    self.param_ranges[pname] = {
+                        "min": p.get("min", 0),
+                        "max": p.get("max", 0),
+                        "default": p.get("defaultValue", 0),
+                    }
+            self._cached_mouth_param = None
+            logger.info(f"获取到 {len(self.param_ranges)} 个参数的范围和默认值")
+            return True
+        except Exception as e:
+            logger.error(f"获取参数范围失败: {e}")
+            return False
+
+    async def set_direction(self, direction: str) -> bool:
+        """仅设置方向标签，不实际移动（兼容保留）。"""
+        if direction not in VALID_DIRECTIONS:
+            logger.warning(f"无效方向: {direction}")
+            return False
+        self.current_direction = direction
+        return True
+
+    # ------------------------------------------------------------------
+    # WebSocket 注入
+    # ------------------------------------------------------------------
+
+    async def inject_parameter_data(self, parameter_values, face_found=True, mode="set"):
+        """下发参数到 VTube Studio。调用者必须持有 operation_lock。"""
+        try:
             data = {
                 "parameterValues": parameter_values,
                 "faceFound": face_found,
-                "mode": mode
+                "mode": mode,
             }
-            
             if self.api.auth_token:
                 data["authenticationToken"] = self.api.auth_token
-            
-            # 发送请求
-            response = await self.api.send_request(
+            return await self.api.send_request(
                 api_name="VTubeStudioPublicAPI",
                 message_type="InjectParameterDataRequest",
-                data=data
+                data=data,
             )
-            
-            return response
         except Exception as e:
-            print(f"注入参数数据失败: {e}")
+            logger.error(f"注入参数数据失败: {e}")
             return None
-    
-    async def idle_movement(self):
-        """实现常态的大型不规则运行"""
-        # 初始化当前时间
-        current_time = time.time()
-        
+
+    # ------------------------------------------------------------------
+    # 长运行循环：空闲呼吸 + 指令队列处理
+    # ------------------------------------------------------------------
+
+    async def idle_movement(self) -> None:
+        """空闲呼吸循环：每 tick 持锁下发 core_params + 呼吸。"""
         while self.running:
             try:
-                # 如果正在执行指令，跳过本次循环，避免冲突导致抽搐
-                if self.executing_command:
-                    await asyncio.sleep(0.05)
-                    continue
-                
-                # 获取操作锁，确保与指令执行不冲突
                 async with self.operation_lock:
-                    # 更新当前时间
-                    current_time = time.time()
-                    
-                    # 执行非移动状态处理（核心参数 + 常态晃动）
-                    await self.update_non_moving_state(current_time)
-                
-                # 每次循环更新一次参数可视化（约0.1秒一次）
-                # 如果启用了参数可视化，获取真实参数并更新界面
-                if self.visualizer:
-                    try:
-                        # 获取真实参数
-                        response = await self.api.get_tracking_parameters()
-                        if response and "data" in response:
-                            data = response["data"]
-                            parameters = []
-                            
-                            # 获取默认参数
-                            if "defaultParameters" in data:
-                                for param in data["defaultParameters"]:
-                                    parameters.append({
-                                        "name": param.get("name"),
-                                        "value": param.get("value", 0),
-                                        "min": param.get("min", 0),
-                                        "max": param.get("max", 0),
-                                        "defaultValue": param.get("defaultValue", 0),
-                                        "addedBy": "VTube Studio"
-                                    })
-                            
-                            # 获取自定义参数
-                            if "customParameters" in data:
-                                for param in data["customParameters"]:
-                                    parameters.append({
-                                        "name": param.get("name"),
-                                        "value": param.get("value", 0),
-                                        "min": param.get("min", 0),
-                                        "max": param.get("max", 0),
-                                        "defaultValue": param.get("defaultValue", 0),
-                                        "addedBy": param.get("addedBy", "Unknown")
-                                    })
-                            
-                            # 更新可视化界面
-                            self.visualizer.update_gui(parameters)
-                    except Exception as e:
-                        print(f"更新参数可视化失败: {e}")
-                
-                # 等待一小段时间
-                await asyncio.sleep(0.1)
+                    now = time.time()
+                    await self.update_non_moving_state(now)
+                await asyncio.sleep(_MOVE_STEP_SEC)
             except Exception as e:
-                print(f"执行常态运动失败: {e}")
-                await asyncio.sleep(1)
-    
-    async def add_command(self, command):
-        """向指令队列添加指令
-        
-        参数:
-            command (dict): 指令字典，包含action和参数
-                示例: {"action": "move_to_direction", "direction": "center", "duration": 1}
-                      {"action": "set_mouth", "state": True}
-                      {"action": "stop"}
-        """
+                logger.error(f"执行常态运动失败: {e}")
+                await asyncio.sleep(1.0)
+
+    async def add_command(self, command: dict) -> None:
         await self.command_queue.put(command)
-        print(f"已添加指令: {command}")
-    
-    async def process_commands(self):
-        """处理指令队列中的指令"""
+        logger.debug(f"已添加指令: {command}")
+
+    async def process_commands(self) -> None:
         while self.running:
             try:
-                # 尝试获取指令（非阻塞）
                 try:
                     command = self.command_queue.get_nowait()
                 except asyncio.QueueEmpty:
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.02)
                     continue
-                
-                # 处理指令
-                self.executing_command = True
-                try:
-                    await self.execute_command(command)
-                finally:
-                    self.executing_command = False
-                
-                # 标记指令完成
+                await self.execute_command(command)
                 self.command_queue.task_done()
             except Exception as e:
-                print(f"处理指令失败: {e}")
+                logger.error(f"处理指令失败: {e}")
                 await asyncio.sleep(0.1)
-    
-    async def execute_command(self, command):
-        """执行单个指令
-        
-        参数:
-            command (dict): 指令字典
-        """
-        action = command.get("action", "").lower()
-        
+
+    async def execute_command(self, command: dict) -> None:
+        action = str(command.get("action", "")).lower()
         if action == "move_to_direction":
             direction = command.get("direction", "center")
-            duration = command.get("duration", 1.5)
-            print(f"执行指令: 移动到方向 {direction}")
+            duration = float(command.get("duration", 1.5))
+            logger.info(f"执行指令: 移动到方向 {direction} ({duration}s)")
             await self.move_to_direction(direction, duration)
-        
         elif action == "set_direction":
-            direction = command.get("direction", "center")
-            print(f"执行指令: 设置方向 {direction}")
-            await self.set_direction(direction)
-        
+            await self.set_direction(command.get("direction", "center"))
         elif action == "set_mouth":
             state = command.get("state", False)
-            print(f"执行指令: 设置嘴巴状态 {state}")
+            logger.info(f"执行指令: 设置嘴巴状态 state={state}")
             await self.set_mouth_state(state)
-        
         elif action == "open_mouth":
-            print("执行指令: 张开嘴巴")
+            logger.info("执行指令: 张开嘴巴")
             await self.set_mouth_state(True)
-        
         elif action == "close_mouth":
-            print("执行指令: 关闭嘴巴")
+            logger.info("执行指令: 关闭嘴巴")
             await self.set_mouth_state(False)
-        
         elif action == "idle":
-            print("执行指令: 恢复常态运动")
-            # 回到中心位置
-            await self.move_to_direction("center", duration=0.5)
-        
+            logger.info("执行指令: 回到中心")
+            await self.move_to_direction("center", duration=0.6)
         elif action == "stop":
-            print("执行指令: 停止控制器")
+            logger.info("执行指令: 停止控制器")
             self.running = False
-        
         else:
-            print(f"未知指令: {action}")
-    
-    async def run(self):
-        """启动控制器，开始运行（持续监听模式）"""
+            logger.warning(f"未知指令: {action}")
+
+    async def run(self) -> None:
         self.running = True
-        print("Live2D控制器已启动（持续监听模式）")
-        print("等待接收指令...")
-        
+        logger.info("Live2D 控制器已启动（持续监听模式）")
         try:
-            # 创建任务：常态运动和指令处理
-            tasks = [
+            await asyncio.gather(
                 asyncio.create_task(self.idle_movement()),
-                asyncio.create_task(self.process_commands())
-            ]
-            
-            # 等待所有任务完成
-            await asyncio.gather(*tasks)
+                asyncio.create_task(self.process_commands()),
+            )
         except Exception as e:
-            print(f"控制器运行出错: {e}")
+            logger.error(f"控制器运行出错: {e}")
         finally:
             self.running = False
-    
-    async def stop(self):
-        """停止控制器"""
+
+    async def stop(self) -> None:
         self.running = False
-        print("Live2D控制器已停止")
+        logger.info("Live2D 控制器已停止")
 
 
-# 全局控制器实例（用于外部访问）
-live2d_controller = None
+# ---------------------------------------------------------------------------
+# 模块级入口
+# ---------------------------------------------------------------------------
+
+live2d_controller: Live2DMain | None = None
+
 
 async def initialize_live2d(host="localhost", port=8001, visualize=True):
-    """初始化Live2D控制器（供外部调用）
-    
-    参数:
-        host (str): VTube Studio服务器主机名
-        port (int): VTube Studio服务器端口
-        visualize (bool): 是否启动可视化界面
-    
-    返回:
-        Live2DMain: 控制器实例，如果初始化失败返回None
-    """
+    """初始化 Live2D 控制器（供外部调用）"""
     global live2d_controller
-    
     try:
-        # 创建控制器实例
         live2d_controller = Live2DMain(host=host, port=port)
-        
-        # 连接服务器
         if not await live2d_controller.connect():
-            print("连接VTube Studio服务器失败")
+            logger.error("连接 VTube Studio 服务器失败")
             return None
-        
-        # 登录认证
         if not await live2d_controller.login():
             await live2d_controller.disconnect()
-            print("登录VTube Studio失败")
+            logger.error("登录 VTube Studio 失败")
             return None
-        
-        # 统一初始化
         if not await live2d_controller.initialize():
             await live2d_controller.disconnect()
-            print("初始化失败")
+            logger.error("初始化失败")
             return None
-        
-        # 设置初始嘴巴状态
         await live2d_controller.set_mouth_state(False)
-        
-        # 如果需要启动可视化界面
+
         if visualize:
             try:
                 from live2d_param_visualizer import Live2DParamVisualizer
-                # 创建参数可视化器
-                visualizer = Live2DParamVisualizer()
-                # 保存visualizer引用到控制器实例
-                live2d_controller.visualizer = visualizer
-                # 在后台运行可视化器
-                asyncio.create_task(visualizer.run())
-                
-                # 立即更新一次可视化数据
-                response = await live2d_controller.api.get_tracking_parameters()
-                if response and "data" in response:
-                    data = response["data"]
-                    parameters = []
-                    
-                    if "defaultParameters" in data:
-                        for param in data["defaultParameters"]:
-                            parameters.append({
-                                "name": param.get("name"),
-                                "value": param.get("value", 0),
-                                "min": param.get("min", 0),
-                                "max": param.get("max", 0),
-                                "defaultValue": param.get("defaultValue", 0),
-                                "addedBy": "VTube Studio"
-                            })
-                    
-                    if "customParameters" in data:
-                        for param in data["customParameters"]:
-                            parameters.append({
-                                "name": param.get("name"),
-                                "value": param.get("value", 0),
-                                "min": param.get("min", 0),
-                                "max": param.get("max", 0),
-                                "defaultValue": param.get("defaultValue", 0),
-                                "addedBy": param.get("addedBy", "Unknown")
-                            })
-                    
-                    visualizer.update_gui(parameters)
-                    print("可视化界面初始化完成")
+                viz = Live2DParamVisualizer()
+                live2d_controller.visualizer = viz
+                asyncio.create_task(viz.run())
+                # 可视化器单独采样，持锁避免 WS 冲突
+                async def _viz_sample():
+                    while live2d_controller.running:
+                        try:
+                            async with live2d_controller.operation_lock:
+                                resp = await live2d_controller.api.get_tracking_parameters()
+                            if resp and "data" in resp:
+                                data = resp["data"]
+                                params = []
+                                for key in ("defaultParameters", "customParameters"):
+                                    for p in data.get(key, []):
+                                        params.append({
+                                            "name": p.get("name"),
+                                            "value": p.get("value", 0),
+                                            "min": p.get("min", 0),
+                                            "max": p.get("max", 0),
+                                            "defaultValue": p.get("defaultValue", 0),
+                                            "addedBy": p.get("addedBy", "VTube Studio"),
+                                        })
+                                viz.update_gui(params)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(0.5)  # 慢采样，减少锁争抢
+                asyncio.create_task(_viz_sample())
+                logger.info("可视化界面初始化完成")
             except Exception as e:
-                print(f"初始化可视化失败: {e}")
-        
-        print("Live2D控制器初始化完成")
+                logger.debug(f"初始化可视化失败: {e}")
+
+        logger.info("Live2D 控制器初始化完成")
         return live2d_controller
-    
     except Exception as e:
-        print(f"初始化Live2D控制器失败: {e}")
+        logger.error(f"初始化 Live2D 控制器失败: {e}")
         if live2d_controller:
             await live2d_controller.disconnect()
         return None
 
-async def send_command(command):
-    """向Live2D控制器发送指令（供外部调用）
-    
-    参数:
-        command (dict): 指令字典
-    
-    返回:
-        bool: 是否成功发送
-    """
+
+async def send_command(command: dict) -> bool:
     if live2d_controller and live2d_controller.running:
         await live2d_controller.add_command(command)
         return True
-    else:
-        print("Live2D控制器未启动或未初始化")
-        return False
+    logger.warning("Live2D 控制器未启动或未初始化")
+    return False
 
-# LangGraph兼容的节点函数
+
 def live2d_node(state):
-    """LangGraph兼容的Live2D控制节点
-    
-    输入:
-        state (dict): LangGraph状态，包含以下字段：
-            - visual_focus: str, 视觉焦点/方向（center/up/down/left/right/upleft/upright/downleft/downright）
-            - action: str, 动作类型（open_mouth/close_mouth/idle/空字符串），默认为空
-    
-    输出:
-        dict: 更新后的状态，包含以下字段：
-            - live2d_status: str, 状态（success/error）
-            - live2d_message: str, 执行消息
-    """
+    """LangGraph 兼容节点（同步桥接，保留旧接口）。"""
     global live2d_controller
-    
     if not live2d_controller or not live2d_controller.running:
-        print("Live2D控制器未启动")
         state["live2d_status"] = "error"
-        state["live2d_message"] = "Live2D控制器未启动"
+        state["live2d_message"] = "Live2D 控制器未启动"
         return state
-    
     try:
-        # 获取视觉焦点（方向）
         visual_focus = state.get("visual_focus", "").strip().lower()
-        
-        # 获取动作（默认为空）
         action = state.get("action", "").strip().lower()
-        
-        # 验证方向是否有效
-        valid_directions = ["center", "up", "down", "left", "right", "upleft", "upright", "downleft", "downright"]
-        
-        # 如果有视觉焦点，发送移动指令
-        if visual_focus and visual_focus in valid_directions:
-            # 使用线程安全的方式发送指令
+        valid = set(VALID_DIRECTIONS)
+
+        if visual_focus and visual_focus in valid:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(live2d_controller.add_command({
                 "action": "move_to_direction",
                 "direction": visual_focus,
-                "duration": 1.5  # 增加移动时间，使动作更平滑
+                "duration": 1.5,
             }))
             loop.close()
             state["live2d_status"] = "success"
             state["live2d_message"] = f"已发送视觉焦点指令: {visual_focus}"
-        
-        # 如果有动作指令，执行动作
         if action:
-            if action == "open_mouth":
+            amap = {"open_mouth": "open_mouth", "close_mouth": "close_mouth", "idle": "idle"}
+            if action in amap:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                loop.run_until_complete(live2d_controller.add_command({"action": "open_mouth"}))
+                loop.run_until_complete(live2d_controller.add_command({"action": amap[action]}))
                 loop.close()
                 state["live2d_status"] = "success"
-                state["live2d_message"] = "已发送张开嘴巴指令"
-            
-            elif action == "close_mouth":
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(live2d_controller.add_command({"action": "close_mouth"}))
-                loop.close()
-                state["live2d_status"] = "success"
-                state["live2d_message"] = "已发送关闭嘴巴指令"
-            
-            elif action == "idle":
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(live2d_controller.add_command({"action": "idle"}))
-                loop.close()
-                state["live2d_status"] = "success"
-                state["live2d_message"] = "已发送恢复常态指令"
-        
-        # 如果既没有视觉焦点也没有动作，尝试从response中提取语气
-        if not visual_focus and not action:
-            response = state.get("response", "")
-            if response and response.startswith("【"):
-                end_bracket = response.find("】")
-                if end_bracket != -1:
-                    tone = response[1:end_bracket]
-                    # 根据语气设置动作
-                    action_map = {
-                        "开心": "open_mouth",
-                        "惊喜": "open_mouth",
-                        "调皮": "open_mouth",
-                        "撩拨": "open_mouth",
-                        "撒娇": "open_mouth",
-                        "生气": "close_mouth",
-                        "严肃": "close_mouth",
-                        "难过": "close_mouth",
-                        "疑问": "idle",
-                        "尴尬": "idle",
-                    }
-                    action_type = action_map.get(tone, "idle")
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    loop.run_until_complete(live2d_controller.add_command({"action": action_type}))
-                    loop.close()
-                    state["live2d_status"] = "success"
-                    state["live2d_message"] = f"根据语气'{tone}'自动执行动作: {action_type}"
-                else:
-                    state["live2d_status"] = "success"
-                    state["live2d_message"] = "未指定视觉焦点和动作，保持常态"
-            else:
-                state["live2d_status"] = "success"
-                state["live2d_message"] = "未指定视觉焦点和动作，保持常态"
-        
+                state["live2d_message"] = f"已发送动作指令: {action}"
         return state
-    
     except Exception as e:
         state["live2d_status"] = "error"
         state["live2d_message"] = str(e)
-        print(f"Live2D节点执行失败: {e}")
+        logger.error(f"Live2D 节点执行失败: {e}")
         return state
 
-# 使用示例（持续监听模式）
+
 async def main():
-    # 解析命令行参数
     parser = argparse.ArgumentParser(description="Live2D 模型控制程序（持续监听模式）")
     parser.add_argument("--no-visualize", action="store_true", help="不启动参数可视化界面")
-    parser.add_argument("--host", type=str, default="localhost", help="VTube Studio服务器主机")
-    parser.add_argument("--port", type=int, default=8001, help="VTube Studio服务器端口")
+    parser.add_argument("--host", type=str, default="localhost", help="VTube Studio 服务器主机")
+    parser.add_argument("--port", type=int, default=8001, help="VTube Studio 服务器端口")
     args = parser.parse_args()
-    
-    # 初始化控制器
-    controller = await initialize_live2d(
-        host=args.host,
-        port=args.port,
-        visualize=not args.no_visualize
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-    
+
+    controller = await initialize_live2d(
+        host=args.host, port=args.port, visualize=not args.no_visualize
+    )
     if not controller:
         print("初始化失败，退出程序")
         return
-    
     try:
-        # 启动控制器（持续监听模式）
         await controller.run()
     except KeyboardInterrupt:
         print("\n程序被用户中断")
     finally:
-        # 断开连接
         await controller.disconnect()
 
 

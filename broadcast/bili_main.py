@@ -4,264 +4,357 @@
 哔哩哔哩弹幕监听主程序
 
 功能：
-1. 常态监听指定直播间的弹幕信息
-2. 每收到一条弹幕就转换为OPENAI格式并打印
-3. 持续运行，实时处理新弹幕
+1. 常态监听指定直播间的弹幕/礼物/SC信息
+2. 弹幕去重（避免重复处理同一条消息）
+3. 连接断开自动重连（指数退避）
+4. 每收到一条有效消息就转换为OpenAI格式，并通过HTTP POST转发给主程序
 """
 
 import asyncio
 import json
 import logging
 import time
-import uuid
 import http.cookies
 import os
 import aiohttp
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional, Set
 
-# 导入blivedm库
+# 导入blivedm库（当前目录）
 import blivedm
 import blivedm.models.web as web_models
 
-# 配置日志
+# ---------- 配置 ----------
+_CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config.json')
+
+# 从config.json读取配置
+def _load_config() -> Dict[str, Any]:
+    try:
+        with open(_CONFIG_PATH, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+        room_ids_raw = cfg.get('ROOM_IDS', '71001')
+        if isinstance(room_ids_raw, (list, tuple)):
+            room_ids = [int(str(x).strip()) for x in room_ids_raw if str(x).strip()]
+        else:
+            room_ids = [int(x.strip()) for x in str(room_ids_raw).split(',') if x.strip()]
+        return {
+            'ROOM_IDS': room_ids,
+            'SESSDATA': cfg.get('SESSDATA', ''),
+            'OUTPUT_PORT': int(cfg.get('output_port', 8081)),
+        }
+    except Exception as e:
+        logging.error(f"读取配置文件失败: {e}，使用默认值")
+        return {
+            'ROOM_IDS': [71001],
+            'SESSDATA': '',
+            'OUTPUT_PORT': 8081,
+        }
+
+_CFG = _load_config()
+TEST_ROOM_IDS = _CFG['ROOM_IDS']
+SESSDATA = _CFG['SESSDATA']
+OUTPUT_PORT = _CFG['OUTPUT_PORT']
+
+# ---------- 日志 ----------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('bili_main.log'),
+        logging.FileHandler(os.path.join(os.path.dirname(__file__), 'bili_main.log'), encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger('BiliMain')
+# 降低blivedm日志噪音
+logging.getLogger('blivedm').setLevel(logging.WARNING)
 
-# 配置参数
-class Config:
-    """配置参数"""
-    # 从config.json读取配置
-    def __init__(self):
-        config_path = os.path.join(os.path.dirname(__file__), 'config.json')
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config_data = json.load(f)
-                # 读取ROOM_IDS，取第一个房间ID
-                room_ids = config_data.get('ROOM_IDS', '27885573')
-                self.ROOM_ID = int(room_ids.split(',')[0].strip())
-                # 读取SESSDATA
-                self.SESSDATA = config_data.get('SESSDATA', '')
-        except Exception as e:
-            logger.error(f"读取配置文件失败: {str(e)}")
-            # 使用默认值
-            self.ROOM_ID = 27885573
-            self.SESSDATA = ""
-    
-    # 直播间配置
-    ROOM_ID = 27885573  # 直播间ID（默认值，会被__init__覆盖）
-    
-    # SESSDATA（可选，用于获取更高权限）
-    SESSDATA = ""  # 默认值，会被__init__覆盖
+# ---------- 弹幕去重 ----------
+# (room_id, message_type, uid, timestamp_ms_or_0, content)
+_processed_ids: Set[str] = set()
+_PROCESSED_MAX = 5000  # 去重集合上限，避免无限增长
 
-# 初始化配置
-config = Config()
-# 重新赋值给类变量
-Config.ROOM_ID = config.ROOM_ID
-Config.SESSDATA = config.SESSDATA
+def _dedup_key(room_id: int, mtype: str, uid: int, ts: float, content: str) -> str:
+    return f"{room_id}|{mtype}|{uid}|{int(ts)}|{content[:40]}"
 
-def convert_to_openai_format(danmaku_data: Dict[str, Any]) -> Dict[str, Any]:
+def _mark_processed(key: str) -> bool:
+    """返回 True 表示是新消息（未处理过）"""
+    if key in _processed_ids:
+        return False
+    _processed_ids.add(key)
+    # 超过上限时淘汰老的一半
+    if len(_processed_ids) > _PROCESSED_MAX:
+        half = _PROCESSED_MAX // 2
+        to_remove = sorted(_processed_ids)[:half]
+        for k in to_remove:
+            _processed_ids.discard(k)
+    return True
+
+# ---------- HTTP转发 ----------
+_FORWARD_URL = f"http://127.0.0.1:{OUTPUT_PORT}/"
+_forward_session: Optional[aiohttp.ClientSession] = None
+
+def _ensure_forward_session() -> aiohttp.ClientSession:
+    global _forward_session
+    if _forward_session is None or _forward_session.closed:
+        _forward_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))
+    return _forward_session
+
+
+async def forward_message(openai_message: Dict[str, Any], raw: Dict[str, Any]) -> None:
     """
-    将单个弹幕转换为OPENAI格式
-    
-    参数:
-        danmaku_data: 弹幕数据
-    
-    返回:
-        OPENAI格式的消息
+    转发消息到主程序。payload与sample.py兼容：直接发OpenAI message字典，
+    主程序handle_post_request会自动包装成列表调用handle_messages。
     """
-    # 生成弹幕文本
-    user_name = danmaku_data.get("user", {}).get("uname", "未知用户")
-    content = danmaku_data.get("content", "")
-    timestamp = danmaku_data.get("timestamp", 0)
-    message_type = danmaku_data.get("message_type", "danmaku")
-    
-    # 格式化时间
     try:
-        time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
-    except:
-        time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-    
-    # 根据消息类型添加前缀
+        session = _ensure_forward_session()
+        async with session.post(
+            _FORWARD_URL,
+            json=openai_message,
+            headers={'Content-Type': 'application/json'},
+        ) as resp:
+            if resp.status >= 300:
+                txt = await resp.text()
+                logger.warning(f"转发消息到主程序返回非2xx: status={resp.status}, body={txt[:200]}")
+    except Exception as e:
+        # 静默处理：主程序可能还没启动，但弹幕监听要继续运行
+        logger.debug(f"转发消息到主程序失败(主程序未就绪?): {e}")
+
+
+# ---------- 消息格式转换 ----------
+def convert_to_openai_message(message_data: Dict[str, Any]) -> Dict[str, Any]:
+    """将弹幕/礼物/SC数据转为OpenAI message格式（含name字段）"""
+    message_type = message_data.get("type", "danmaku")
+    user_name = message_data.get("user", {}).get("uname", "未知用户")
+
     if message_type == "danmaku":
-        type_prefix = "[弹幕]"
+        content = message_data.get("content", "")
     elif message_type == "gift":
-        type_prefix = "[礼物]"
+        gift_name = message_data.get("gift", {}).get("name", "")
+        num = message_data.get("gift", {}).get("num", 1)
+        content = f"赠送了{num}个{gift_name}"
     elif message_type == "super_chat":
-        type_prefix = "[SC]"
+        content = message_data.get("message", "")
+        price = message_data.get("price", 0)
+        content = f"[{price}元SC] {content}"
     else:
-        type_prefix = "[其他]"
-    
-    danmaku_text = f"[{time_str}]{type_prefix} {user_name}: {content}"
-    
-    # 构建OPENAI格式
-    openai_format = {
-        "messages": [
-            {
-                "role": "system",
-                "content": "你是一个专业的直播弹幕分析助手，能够分析直播弹幕内容，总结讨论的主要话题，并对热门问题进行回答。你需要基于弹幕内容，提供准确、全面、有条理的分析和回答。"
-            },
-            {
-                "role": "user",
-                "content": f"请分析以下直播消息内容，总结讨论的主要话题，并对热门问题进行回答：\n{danmaku_text}"
-            }
-        ],
-        "session_id": str(uuid.uuid4()),
-        "user_id": str(uuid.uuid4()),
-        "danmaku_count": 1,
-        "timestamp": time.time()
+        content = message_data.get("content", "")
+
+    return {
+        "role": "user",
+        "content": content,
+        "name": user_name,
     }
-    
-    return openai_format
+
+
+# ---------- Handler ----------
+# 连接时间阈值：连接前的历史弹幕将被丢弃（5秒容差处理时钟偏差）
+_HISTORY_GRACE_SECONDS = 5
+
 
 class RealTimeDanmakuHandler(blivedm.BaseHandler):
-    """实时弹幕处理器"""
-    
+    """实时弹幕处理器：历史弹幕过滤 + 去重 + 打印 + 转发"""
+
+    def __init__(self):
+        # 记录连接时间，用于过滤连接时推送的历史弹幕
+        self.connect_time = time.time()
+
+    def _is_history_message(self, timestamp: float) -> bool:
+        """判断是否为历史消息（连接前推送的旧弹幕）"""
+        return float(timestamp) < self.connect_time - _HISTORY_GRACE_SECONDS
+
+    def _on_unknown_command(self, client, command):
+        pass  # 静默忽略未知命令
+
+    def _on_heartbeat(self, client, message):
+        pass
+
     def _on_danmaku(self, client: blivedm.BLiveClient, message: web_models.DanmakuMessage):
-        """处理弹幕消息"""
-        danmaku_data = {
+        # 过滤连接时推送的历史弹幕
+        if self._is_history_message(message.timestamp):
+            logger.debug(f"[历史弹幕-跳过] {message.uname}: {message.msg[:30]}")
+            return
+
+        raw = {
+            "type": "danmaku",
+            "room_id": client.room_id,
             "user": {
+                "uid": message.uid,
                 "uname": message.uname,
-                "uid": message.uid
             },
             "content": message.msg,
-            "timestamp": time.time(),
-            "message_type": "danmaku"
+            "timestamp": message.timestamp,
         }
-        logger.info(f"收到弹幕: {message.uname}: {message.msg}")
-        
-        # 转换为OpenAI格式
-        openai_format = convert_to_openai_format(danmaku_data)
-        
-        # 打印结果
-        print("\n=== 消息分析 ===")
-        print("收到1条弹幕")
-        print("OpenAI格式消息:")
-        print(json.dumps(openai_format, ensure_ascii=False, indent=2))
-        print("\n" + "="*50 + "\n")
-    
+        key = _dedup_key(
+            client.room_id, "danmaku", message.uid,
+            float(message.timestamp), message.msg,
+        )
+        if not _mark_processed(key):
+            logger.debug(f"[去重-弹幕] 跳过重复: {message.uname}: {message.msg[:30]}")
+            return
+
+        logger.info(f"[弹幕] {message.uname}: {message.msg}")
+        openai_msg = convert_to_openai_message(raw)
+        print(json.dumps(openai_msg, ensure_ascii=False))
+        asyncio.create_task(forward_message(openai_msg, raw))
+
     def _on_gift(self, client: blivedm.BLiveClient, message: web_models.GiftMessage):
-        """处理礼物消息"""
-        gift_data = {
-            "user": {
-                "uname": message.uname,
-                "uid": message.uid
+        # 过滤连接时推送的历史礼物
+        if self._is_history_message(message.timestamp):
+            logger.debug(f"[历史礼物-跳过] {message.uname} {message.gift_name}x{message.num}")
+            return
+
+        raw = {
+            "type": "gift",
+            "room_id": client.room_id,
+            "user": {"uid": message.uid, "uname": message.uname},
+            "gift": {
+                "name": message.gift_name,
+                "num": message.num,
+                "price": message.price,
             },
-            "content": f"赠送了{message.num}个{message.gift_name}",
-            "gift_name": message.gift_name,
-            "num": message.num,
-            "timestamp": time.time(),
-            "message_type": "gift"
+            "timestamp": message.timestamp,
         }
-        logger.info(f"收到礼物: {message.uname} 赠送了{message.num}个{message.gift_name}")
-        
-        # 转换为OpenAI格式
-        openai_format = convert_to_openai_format(gift_data)
-        
-        # 打印结果
-        print("\n=== 消息分析 ===")
-        print("收到1条礼物消息")
-        print("OpenAI格式消息:")
-        print(json.dumps(openai_format, ensure_ascii=False, indent=2))
-        print("\n" + "="*50 + "\n")
-    
+        key = _dedup_key(
+            client.room_id, "gift", message.uid,
+            float(message.timestamp),
+            f"{message.gift_name}x{message.num}",
+        )
+        if not _mark_processed(key):
+            logger.debug(f"[去重-礼物] 跳过重复: {message.uname} {message.gift_name}x{message.num}")
+            return
+
+        logger.info(f"[礼物] {message.uname} 赠送了{message.num}个{message.gift_name}")
+        openai_msg = convert_to_openai_message(raw)
+        print(json.dumps(openai_msg, ensure_ascii=False))
+        asyncio.create_task(forward_message(openai_msg, raw))
+
     def _on_super_chat(self, client: blivedm.BLiveClient, message: web_models.SuperChatMessage):
-        """处理超级聊天消息"""
-        sc_data = {
-            "user": {
-                "uname": message.uname,
-                "uid": message.uid
-            },
-            "content": message.message,
+        # 过滤连接时推送的历史SC
+        if self._is_history_message(message.start_time):
+            logger.debug(f"[历史SC-跳过] {message.uname} ({message.price}元)")
+            return
+
+        raw = {
+            "type": "super_chat",
+            "room_id": client.room_id,
+            "user": {"uid": message.uid, "uname": message.uname},
+            "message": message.message,
             "price": message.price,
-            "timestamp": time.time(),
-            "message_type": "super_chat"
+            "timestamp": message.start_time,
         }
-        logger.info(f"收到SC: {message.uname} ({message.price}元): {message.message}")
-        
-        # 转换为OpenAI格式
-        openai_format = convert_to_openai_format(sc_data)
-        
-        # 打印结果
-        print("\n=== 消息分析 ===")
-        print("收到1条超级聊天消息")
-        print("OpenAI格式消息:")
-        print(json.dumps(openai_format, ensure_ascii=False, indent=2))
-        print("\n" + "="*50 + "\n")
+        key = _dedup_key(
+            client.room_id, "super_chat", message.uid,
+            float(message.start_time), message.message,
+        )
+        if not _mark_processed(key):
+            logger.debug(f"[去重-SC] 跳过重复: {message.uname} ({message.price}元)")
+            return
 
-def init_session():
-    """初始化session"""
+        logger.info(f"[SC] {message.uname} ({message.price}元): {message.message}")
+        openai_msg = convert_to_openai_message(raw)
+        print(json.dumps(openai_msg, ensure_ascii=False))
+        asyncio.create_task(forward_message(openai_msg, raw))
+
+
+# ---------- Session初始化 ----------
+def init_session() -> aiohttp.ClientSession:
     cookies = http.cookies.SimpleCookie()
-    if Config.SESSDATA:
-        cookies['SESSDATA'] = Config.SESSDATA
+    if SESSDATA:
+        cookies['SESSDATA'] = SESSDATA
         cookies['SESSDATA']['domain'] = 'bilibili.com'
-
     session = aiohttp.ClientSession()
-    if Config.SESSDATA:
+    if SESSDATA:
         session.cookie_jar.update_cookies(cookies)
-    
     return session
 
-async def start_real_time_listener(room_id: int):
+
+# ---------- 监听+重连循环 ----------
+async def start_real_time_listener(room_ids):
     """
-    开始实时监听弹幕
-    
-    参数:
-        room_id: 直播间ID
+    开始实时监听弹幕（支持多个直播间），连接断开后自动重连。
+    重连间隔：1s -> 2s -> 4s -> 8s -> 最大30s。
     """
-    logger.info(f"开始实时监听直播间 {room_id} 的弹幕")
-    
-    # 初始化session
-    session = init_session()
-    
-    # 创建处理器
-    handler = RealTimeDanmakuHandler()
-    
-    # 创建客户端
-    client = blivedm.BLiveClient(room_id, session=session)
-    client.set_handler(handler)
-    
-    try:
-        # 开始连接
-        client.start()
-        logger.info("客户端已启动，开始实时监听弹幕")
-        print(f"\n=== 实时弹幕监听系统 ===")
-        print(f"正在监听直播间: {room_id}")
-        print("每收到一条消息就会转换为OpenAI格式并打印")
-        print("按 Ctrl+C 停止\n")
-        
-        # 持续运行
-        while True:
-            await asyncio.sleep(1)
-            
-    except KeyboardInterrupt:
-        logger.info("用户中断程序")
-        print("\n程序已停止")
-    except Exception as e:
-        logger.error(f"监听过程中发生错误: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        print(f"\n发生错误: {str(e)}")
-    finally:
-        # 停止客户端和session
-        client.stop()
-        await client.join()
-        await client.stop_and_close()
-        await session.close()
-        logger.info("客户端已停止")
+    logger.info(f"开始实时监听直播间 {room_ids} 的弹幕，转发到 {_FORWARD_URL}")
+
+    backoff = 1.0
+    backoff_max = 30.0
+
+    while True:
+        session = init_session()
+        handler = RealTimeDanmakuHandler()
+        clients = [blivedm.BLiveClient(rid, session=session) for rid in room_ids]
+        for c in clients:
+            c.set_handler(handler)
+
+        try:
+            for c in clients:
+                c.start()
+            logger.info(f"已启动 {len(clients)} 个弹幕监听客户端")
+            print(f"\n=== 实时弹幕监听系统 ===")
+            print(f"正在监听直播间: {room_ids}")
+            print(f"转发目标: {_FORWARD_URL}")
+            print("按 Ctrl+C 停止\n")
+
+            backoff = 1.0  # 连接成功：重置退避
+            # 等待任意客户端终止（通常是连接断开）
+            await asyncio.gather(*(c.join() for c in clients), return_exceptions=True)
+
+        except asyncio.CancelledError:
+            logger.info("监听任务被取消")
+            break
+        except KeyboardInterrupt:
+            logger.info("用户中断程序")
+            break
+        except Exception as e:
+            logger.error(f"监听过程中发生错误: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+        finally:
+            # 关闭所有客户端和session
+            for c in clients:
+                try:
+                    c.stop()
+                except Exception:
+                    pass
+            for c in clients:
+                try:
+                    await c.stop_and_close()
+                except Exception:
+                    pass
+            try:
+                await session.close()
+            except Exception:
+                pass
+            logger.info(f"当前轮客户端已停止，{backoff:.1f}s后尝试重连...")
+
+        # 退避等待，期间允许CancelledError中断
+        try:
+            await asyncio.sleep(backoff)
+        except asyncio.CancelledError:
+            break
+        backoff = min(backoff * 2, backoff_max)
+
+    # 关闭转发session
+    if _forward_session is not None:
+        try:
+            await _forward_session.close()
+        except Exception:
+            pass
+    logger.info("弹幕监听器已完全退出")
+
+
+async def main_async():
+    if not TEST_ROOM_IDS:
+        logger.error("ROOM_IDS为空，无法启动弹幕监听")
+        return
+    await start_real_time_listener(TEST_ROOM_IDS)
+
 
 def main():
-    """
-    主函数
-    """
-    # 启动实时监听
-    asyncio.run(start_real_time_listener(Config.ROOM_ID))
+    try:
+        asyncio.run(main_async())
+    except KeyboardInterrupt:
+        print("\n程序已停止")
+
 
 if __name__ == "__main__":
     main()

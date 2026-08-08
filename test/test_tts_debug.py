@@ -6,7 +6,7 @@
 import sys
 import os
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def test_tts_node_with_state():
     """测试 TTS 节点是否正确处理状态"""

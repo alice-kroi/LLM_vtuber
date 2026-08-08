@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Audio test files
+*.wav
+
+# Test data and reports
+RAG/test/retrieval_report_*.json
+RAG/test/retrieval_report_*.md
+RAG/test/chat_data_*.json
+
+# Config with secrets
+config.local.ini
+.env
