@@ -73,6 +73,10 @@ class ChatState(TypedDict):
     api_url: Optional[str] = os.getenv("Doubao_API_URL")
     name: Optional[str] = None
     question: Optional[str] = None
+    session_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    storage_success: Optional[bool] = None
+    storage_time: Optional[float] = None
 
 
 # --------- 通用工具 ---------
@@ -101,6 +105,12 @@ def _build_openai_messages(state: ChatState) -> list:
         item: dict = {"role": role, "content": content}
         if name_attr:
             item["name"] = name_attr
+        # 保留 tool_calls（assistant 消息）和 tool_call_id（tool 消息）
+        if isinstance(msg, dict):
+            if msg.get("tool_calls"):
+                item["tool_calls"] = msg["tool_calls"]
+            if msg.get("tool_call_id"):
+                item["tool_call_id"] = msg["tool_call_id"]
         history_msgs.append(item)
 
     # 长度保护：从最老的历史开始丢，直到总字符量<=上限
@@ -145,10 +155,14 @@ def _extract_error_details(e: Exception) -> str:
     return details
 
 
-def _call_chat_api_with_retry(state: ChatState, api_key: str, base_url: str) -> dict:
+def _call_chat_api_with_retry(state: ChatState, api_key: str, base_url: str,
+                               tools: list = None) -> dict:
     """
     调用 OpenAI 兼容聊天 API，带超时和瞬态错误重试。
-    返回 {"response": str, "tokens_used": int}，失败则抛出异常。
+    返回 {"response": str, "tokens_used": int, "tool_calls": list|None}，失败则抛出异常。
+
+    Args:
+        tools: OpenAI function calling 格式的工具列表，None 表示不传 tools
     """
     client = OpenAI(
         api_key=api_key,
@@ -162,16 +176,21 @@ def _call_chat_api_with_retry(state: ChatState, api_key: str, base_url: str) -> 
     last_exc: Optional[Exception] = None
     for attempt in range(MAX_RETRIES + 1):
         try:
-            resp_obj = client.chat.completions.create(
-                model=state["model"],
-                messages=openai_messages,
-                temperature=state["temperature"],
-                max_tokens=state["max_tokens"],
-                top_p=state.get("top_p", 1.0),
-                frequency_penalty=state.get("frequency_penalty", 0.0),
-                presence_penalty=state.get("presence_penalty", 0.0),
-                stream=False
-            )
+            kwargs = {
+                "model": state["model"],
+                "messages": openai_messages,
+                "temperature": state["temperature"],
+                "max_tokens": state["max_tokens"],
+                "top_p": state.get("top_p", 1.0),
+                "frequency_penalty": state.get("frequency_penalty", 0.0),
+                "presence_penalty": state.get("presence_penalty", 0.0),
+                "stream": False
+            }
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"
+
+            resp_obj = client.chat.completions.create(**kwargs)
             msg = resp_obj.choices[0].message
             ai_resp = ""
             if hasattr(msg, "content") and msg.content:
@@ -179,8 +198,19 @@ def _call_chat_api_with_retry(state: ChatState, api_key: str, base_url: str) -> 
             elif hasattr(msg, "reasoning_content") and msg.reasoning_content:
                 ai_resp = msg.reasoning_content
 
+            # 解析 tool_calls
+            tool_calls = None
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                tool_calls = []
+                for tc in msg.tool_calls:
+                    tool_calls.append({
+                        "tool_call_id": tc.id,
+                        "name": tc.function.name,
+                        "arguments": json.loads(tc.function.arguments) if tc.function.arguments else {}
+                    })
+
             tokens = _parse_usage(getattr(resp_obj, "usage", None))
-            return {"response": ai_resp, "tokens_used": tokens}
+            return {"response": ai_resp, "tokens_used": tokens, "tool_calls": tool_calls}
 
         except (APIConnectionError, RateLimitError, APITimeoutError, APIError) as e:
             last_exc = e
@@ -239,11 +269,14 @@ def openai_chat_node(state: ChatState) -> ChatState:
         )
 
 
-def doubao_chat_node(state: ChatState) -> dict:
+def doubao_chat_node(state: ChatState, tools: list = None) -> dict:
     """
     豆包API聊天节点
     注意：返回 dict（与原有约定一致），而不是 ChatState。
     区别于 openai_chat_node：会把 AI 回复追加到 messages 列表中。
+
+    Args:
+        tools: OpenAI function calling 格式的工具列表，None 表示不传 tools
     """
     try:
         api_key = os.getenv("Doubao_API_KEY")
@@ -252,9 +285,21 @@ def doubao_chat_node(state: ChatState) -> dict:
         if not api_key:
             raise ValueError("环境变量 Doubao_API_KEY 未设置")
 
-        result = _call_chat_api_with_retry(state, api_key=api_key, base_url=api_base)
+        result = _call_chat_api_with_retry(state, api_key=api_key, base_url=api_base,
+                                           tools=tools)
 
         logger.info(f"[LLM] 豆包调用成功: tokens={result['tokens_used']}, 响应长度={len(result['response'])}")
+
+        # 如果有 tool_calls，不把 assistant 消息追加到 messages（由调用方处理 tool 消息）
+        tool_calls = result.get("tool_calls")
+        if tool_calls:
+            return {
+                **state,
+                "response": result["response"],
+                "tokens_used": result["tokens_used"],
+                "tool_calls": tool_calls,
+                "error": None
+            }
 
         return {
             **state,
@@ -263,6 +308,7 @@ def doubao_chat_node(state: ChatState) -> dict:
             ],
             "response": result["response"],
             "tokens_used": result["tokens_used"],
+            "tool_calls": None,
             "error": None
         }
 
@@ -272,6 +318,7 @@ def doubao_chat_node(state: ChatState) -> dict:
         return {
             **state,
             "response": "",
+            "tool_calls": None,
             "error": err
         }
 

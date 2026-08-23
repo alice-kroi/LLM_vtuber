@@ -15,7 +15,8 @@ import asyncio
 import argparse
 import json
 import time
-from aiohttp import web
+import configparser
+import uvicorn
 
 # 配置日志（必须在其他模块导入前定义，因为导入时可能已需要logger）
 logging.basicConfig(
@@ -36,6 +37,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from LLM_node import llm_chat_node, context_aware_qa_node, LLMState
 from RAG_node import rag_retrieval_node, rag_save_node, RAGState
+from memory_manager import get_memory_manager, MemoryManager
 
 # 条件导入 TTS 模块
 try:
@@ -68,6 +70,7 @@ http_server = None
 langgraph_manager = None
 live2d_manager = None
 live2d_action_generator = None
+_bili_process = None  # 弹幕监听子进程引用，用于退出时清理
 
 # 消息处理队列：串行处理弹幕，避免 Live2D/TTS 并发冲突导致死锁
 # （move_to_direction 持锁 1.5s，TTS 播放需独占音频，并发会导致排队卡死）
@@ -75,12 +78,19 @@ _message_queue: asyncio.Queue = None
 _queue_worker_task: asyncio.Task = None
 _QUEUE_MAX_SIZE = 10  # 队列上限，超过则丢弃旧消息（弹幕时效性强，保留最新的）
 
+# 消息去重：防止同一条弹幕被多次处理
+_recent_message_keys: set = set()
+_RECENT_MSG_MAX = 2000  # 去重集合上限
+_RECENT_MSG_WINDOW = 5.0  # 去重时间窗口（秒）
+_last_dedup_cleanup = 0.0  # 上次清理时间
+
 # 命令行参数解析
 def parse_args():
     """
     解析命令行参数
     """
     parser = argparse.ArgumentParser(description="LangGraph 主程序")
+    parser.add_argument("--all", action="store_true", help="启动所有功能（Live2D + TTS + 弹幕监听）")
     parser.add_argument("--live2d", action="store_true", help="开启 live2d 功能")
     parser.add_argument("--live2d-host", type=str, default="localhost", help="VTube Studio 服务器地址")
     parser.add_argument("--live2d-port", type=int, default=8001, help="VTube Studio 服务器端口")
@@ -101,16 +111,14 @@ async def handle_post_request(request):
     使用队列的原因：Live2D 的 move_to_direction 持有 operation_lock 长达 1.5s，
     TTS 播放也需独占音频设备。若每条弹幕都并发启动 graph.ainvoke，会导致
     锁竞争排队甚至死锁，TTS 永远无法执行。串行处理确保每条消息完整走完
-    init→rag→llm→rag_save→live2d→tts→finalize 流程。
+    init→load_memory→rag→llm→rag_save→save_memory→live2d→tts→finalize 流程。
     """
-    try:
-        # 读取请求体
-        request_data = await request.json()
+    from fastapi.responses import JSONResponse
 
-        # 直接打印请求信息
+    try:
+        request_data = await request.json()
         logger.info(f"收到HTTP请求: {json.dumps(request_data, ensure_ascii=False)}")
 
-        # 规范化为消息列表
         if isinstance(request_data, list):
             messages = request_data
         elif isinstance(request_data, dict) and 'messages' in request_data:
@@ -118,7 +126,35 @@ async def handle_post_request(request):
         else:
             messages = [request_data]
 
-        # 队列满时丢弃旧消息（弹幕时效性强，优先处理最新的）
+        global _recent_message_keys, _last_dedup_cleanup
+        now = time.time()
+        if now - _last_dedup_cleanup > 30:
+            _recent_message_keys.clear()
+            _last_dedup_cleanup = now
+            logger.debug("消息去重集合已清理")
+
+        deduped_messages = []
+        for msg in (messages if isinstance(messages, list) else [messages]):
+            if msg.get("role") == "user":
+                uname = msg.get("name", msg.get("username", "匿名"))
+                content = msg.get("content", "")
+                ts = msg.get("timestamp", 0)
+                if isinstance(ts, float):
+                    ts = int(ts)
+                msg_key = f"{uname}|{content}|{ts}"
+                if msg_key in _recent_message_keys:
+                    logger.debug(f"[去重] 跳过重复消息: {uname}: {content[:30]}")
+                    continue
+                _recent_message_keys.add(msg_key)
+                if len(_recent_message_keys) > _RECENT_MSG_MAX:
+                    keys_list = list(_recent_message_keys)
+                    _recent_message_keys = set(keys_list[_RECENT_MSG_MAX // 2:])
+            deduped_messages.append(msg)
+        if not deduped_messages:
+            return JSONResponse({"status": "deduped"})
+
+        messages = deduped_messages
+
         while _message_queue and _message_queue.qsize() >= _QUEUE_MAX_SIZE:
             try:
                 _message_queue.get_nowait()
@@ -131,21 +167,23 @@ async def handle_post_request(request):
             await _message_queue.put(messages)
             logger.info(f"消息已入队列（当前队列长度: {_message_queue.qsize()}）")
 
-        # 立即返回，不等处理完成（避免弹幕转发阻塞）
-        return web.Response(
-            status=200,
-            content_type='application/json',
-            text=json.dumps({'status': 'queued'})
-        )
+            try:
+                from webui.app import ws_manager
+                for msg in (messages if isinstance(messages, list) else [messages]):
+                    if msg.get("role") == "user":
+                        name = msg.get("name", "匿名")
+                        content = msg.get("content", "")
+                        await ws_manager.broadcast_danmaku(name, content)
+                        from webui.app import add_message_to_history
+                        add_message_to_history("danmaku", {"username": name, "content": content})
+            except Exception:
+                pass
+
+        return JSONResponse({"status": "queued"})
 
     except Exception as e:
         logger.error(f"处理HTTP请求失败: {e}")
-        # 发送错误响应
-        return web.Response(
-            status=500,
-            content_type='application/json',
-            text=json.dumps({'status': 'error', 'message': str(e)})
-        )
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 async def handle_messages(messages):
     """
@@ -171,7 +209,7 @@ async def _queue_worker():
     """
     队列工作协程：串行处理消息，避免 Live2D/TTS 并发冲突。
 
-    每条消息依次走完完整流程（init→rag→llm→rag_save→live2d→tts→finalize），
+    每条消息依次走完完整流程（init→load_memory→rag→llm→rag_save→save_memory→live2d→tts→finalize），
     确保operation_lock不会因并发争抢而卡死，TTS音频也不会重叠播放。
     """
     logger.info("消息队列 worker 已启动")
@@ -410,6 +448,7 @@ class LangGraphManager:
         """
         self.graph = None
         self.checkpointer = MemorySaver()
+        self.memory_manager = get_memory_manager()
         self.processing_danmaku = False
         self.enable_live2d = False
 
@@ -429,9 +468,11 @@ class LangGraphManager:
 
         # 添加节点
         self.graph.add_node("init", self._init_node)
+        self.graph.add_node("load_memory", self._load_memory_node)
         self.graph.add_node("rag_retrieval", self._rag_retrieval_node)
         self.graph.add_node("llm_process", self._llm_process_node)
         self.graph.add_node("rag_save", self._rag_save_node)
+        self.graph.add_node("save_memory", self._save_memory_node)
         self.graph.add_node("finalize", self._finalize_node)
 
         # 根据参数决定是否添加 TTS 节点
@@ -444,16 +485,18 @@ class LangGraphManager:
             logger.info("添加 Live2D 动作联动节点到图中")
             self.graph.add_node("live2d", live2d_action_node)
 
-        # 添加边
+        # 添加边：init → load_memory → rag_retrieval → llm_process → rag_save → save_memory
         self.graph.add_edge(START, "init")
-        self.graph.add_edge("init", "rag_retrieval")
+        self.graph.add_edge("init", "load_memory")
+        self.graph.add_edge("load_memory", "rag_retrieval")
         self.graph.add_edge("rag_retrieval", "llm_process")
         self.graph.add_edge("llm_process", "rag_save")
+        self.graph.add_edge("rag_save", "save_memory")
 
-        # 根据是否启用 TTS 和 Live2D 决定 rag_save 的下一个节点
+        # 根据是否启用 TTS 和 Live2D 决定 save_memory 的下一个节点
         if self.enable_live2d:
-            # Live2D 在 rag_save 之后、finalize 之前执行
-            self.graph.add_edge("rag_save", "live2d")
+            # Live2D 在 save_memory 之后、finalize 之前执行
+            self.graph.add_edge("save_memory", "live2d")
             if enable_tts and tts_available:
                 self.graph.add_edge("live2d", "tts")
                 self.graph.add_edge("tts", "finalize")
@@ -461,11 +504,11 @@ class LangGraphManager:
                 self.graph.add_edge("live2d", "finalize")
         elif enable_tts and tts_available:
             # 只启用 TTS
-            self.graph.add_edge("rag_save", "tts")
+            self.graph.add_edge("save_memory", "tts")
             self.graph.add_edge("tts", "finalize")
         else:
             # 都不启用
-            self.graph.add_edge("rag_save", "finalize")
+            self.graph.add_edge("save_memory", "finalize")
 
         # 编译图
         self.graph = self.graph.compile(checkpointer=self.checkpointer)
@@ -501,7 +544,7 @@ class LangGraphManager:
             logger.error(f"RAG 检索节点失败: {e}")
             return state
 
-    def _llm_process_node(self, state: LLMState) -> LLMState:
+    async def _llm_process_node(self, state: LLMState) -> LLMState:
         """LLM 处理节点：调用大模型生成响应并解析格式"""
         logger.info("执行 LLM 处理节点")
 
@@ -530,9 +573,9 @@ class LangGraphManager:
                 name=user_message.get("name")
             )
 
-            # 根据是否有上下文选择不同节点
-            llm_result = (context_aware_qa_node(llm_state) if state.get("context")
-                          else llm_chat_node(llm_state))
+            # 根据是否有上下文选择不同节点（均为 async 调用）
+            llm_result = await (context_aware_qa_node(llm_state) if state.get("context")
+                                else llm_chat_node(llm_state))
 
             # 更新状态
             response = llm_result.get("response", "")
@@ -552,6 +595,24 @@ class LangGraphManager:
                 logger.info(f"LLM 处理完成，语气: {parsed['tone']}, 目光: {parsed['visual_focus']}, 嘴巴: {parsed['mouth_state']}")
             else:
                 logger.info(f"LLM 处理完成，语气: {parsed['tone']} (Live2D未启用)")
+
+            # WebSocket 推送 AI 回复（danmaku 已在 handle_post_request 中推送，避免重复）
+            try:
+                from webui.app import ws_manager, add_message_to_history
+                await ws_manager.broadcast_ai_response(
+                    content=parsed["content"],
+                    tone=parsed["tone"],
+                    visual_focus=parsed["visual_focus"],
+                    mouth_state=parsed["mouth_state"]
+                )
+                add_message_to_history("ai_response", {
+                    "content": parsed["content"],
+                    "tone": parsed["tone"],
+                    "visual_focus": parsed["visual_focus"],
+                    "mouth_state": parsed["mouth_state"]
+                })
+            except Exception:
+                pass
 
             return state
 
@@ -605,6 +666,101 @@ class LangGraphManager:
             logger.error(f"RAG 保存节点失败: {e}")
             return state
 
+    async def _load_memory_node(self, state: LLMState) -> LLMState:
+        """
+        加载记忆节点：从 InMemoryStore 加载用户历史对话到上下文中。
+
+        在回答前检查是否有该用户的历史记忆，有则提取作为对话上下文。
+        使用用户名作为记忆标识，确保同一用户的多轮对话可以共享记忆。
+        """
+        logger.info("执行加载记忆节点")
+
+        try:
+            user_message = _extract_last_user_message(state)
+            user_name = ""
+            if user_message:
+                user_name = user_message.get("name", "")
+
+            if not user_name:
+                logger.info("无用户名，跳过加载记忆")
+                return state
+
+            # 使用用户名作为记忆标识
+            user_id = f"user_{user_name}"
+            memory_messages = await self.memory_manager.load_user_memory(user_id)
+
+            if memory_messages:
+                logger.info(f"加载到用户 {user_name} 的 {len(memory_messages)} 条历史记忆")
+                # 将历史记忆注入到 messages 中
+                existing_messages = state.get("messages", [])
+                # 在现有消息之前插入历史记忆（作为对话上下文）
+                state["messages"] = memory_messages + existing_messages
+                state["memory_loaded"] = True
+                state["memory_count"] = len(memory_messages)
+            else:
+                logger.info(f"用户 {user_name} 无历史记忆")
+                state["memory_loaded"] = False
+                state["memory_count"] = 0
+
+            return state
+
+        except Exception as e:
+            logger.warning(f"加载记忆节点失败（降级处理）: {e}")
+            state["memory_loaded"] = False
+            return state
+
+    async def _save_memory_node(self, state: LLMState) -> LLMState:
+        """
+        保存记忆节点：将本轮对话保存到 InMemoryStore。
+
+        回答后更新短期记忆，供后续对话使用。
+        使用用户名作为记忆标识，确保同一用户的多轮对话可以共享记忆。
+        """
+        logger.info("执行保存记忆节点")
+
+        try:
+            response = state.get("response", "")
+            if not response:
+                logger.info("无 AI 回答，跳过保存记忆")
+                return state
+
+            user_message = _extract_last_user_message(state)
+            user_name = ""
+            if user_message:
+                user_name = user_message.get("name", "")
+
+            if not user_name:
+                logger.info("无用户名，跳过保存记忆")
+                return state
+
+            # 使用用户名作为记忆标识
+            user_id = f"user_{user_name}"
+            messages = state.get("messages", [])
+
+            # 保存用户消息和 AI 回答到 InMemoryStore
+            for msg in messages:
+                if isinstance(msg, dict) and msg.get("role") in ("user", "assistant"):
+                    await self.memory_manager.save_message(user_id, msg)
+
+            # 保存上下文信息
+            await self.memory_manager.save_context(user_id, {
+                "question": state.get("question", ""),
+                "context": state.get("context", ""),
+                "source": "langgraph_save_memory",
+                "username": user_name
+            })
+
+            memory_stats = await self.memory_manager.get_memory_stats(user_id)
+            logger.info(f"记忆保存成功 (user={user_name}, 总消息数={memory_stats.get('message_count', 0)})")
+
+            state["memory_saved"] = True
+            return state
+
+        except Exception as e:
+            logger.warning(f"保存记忆节点失败（降级处理）: {e}")
+            state["memory_saved"] = False
+            return state
+
     async def run_with_messages(self, initial_state: LLMState = None):
         """运行图处理消息（合并了原run_with_messages和run两个重复方法）"""
         logger.info("开始运行 LangGraph 处理消息")
@@ -619,6 +775,11 @@ class LangGraphManager:
         if not initial_state:
             initial_state = create_default_llm_state()
 
+        # 生成 thread_id 并注入 state 作为 session_id，供 memory 管理使用
+        thread_id = f"thread_{uuid.uuid4()}"
+        initial_state["thread_id"] = thread_id
+        initial_state["session_id"] = thread_id
+
         logger.info(f"初始状态: {json.dumps(initial_state, ensure_ascii=False)}")
         logger.info("调用graph.ainvoke")
 
@@ -627,7 +788,7 @@ class LangGraphManager:
             config={
                 "recursion_limit": 10,
                 "configurable": {
-                    "thread_id": f"thread_{uuid.uuid4()}",
+                    "thread_id": thread_id,
                     "checkpoint_id": f"session_{uuid.uuid4()}"
                 }
             }
@@ -714,30 +875,231 @@ class LangGraphManager:
         while True:
             await asyncio.sleep(1)
 
+    def rebuild_graph(self, enable_tts=None, enable_live2d=None):
+        """
+        重新构建 LangGraph 图结构（用于动态启停功能）
+
+        Args:
+            enable_tts: 是否启用 TTS，None 则保持当前设置
+            enable_live2d: 是否启用 Live2D，None 则保持当前设置
+        """
+        global args
+        if args is None:
+            args = parse_args()
+
+        # 如果未指定，使用当前 args 的值
+        if enable_tts is None:
+            enable_tts = args.tts
+        if enable_live2d is None:
+            enable_live2d = args.live2d and live2d_available
+
+        logger.info(f"重新构建图结构: TTS={enable_tts}, Live2D={enable_live2d}")
+        self.build_graph(enable_tts=enable_tts, enable_live2d=enable_live2d)
+
+
+# ============ 动态功能控制函数 ============
+
+async def enable_live2d():
+    """启用 Live2D 功能"""
+    global args, live2d_manager
+
+    if not live2d_available:
+        logger.error("Live2D 模块不可用")
+        return False
+
+    if live2d_manager and live2d_manager.is_connected:
+        logger.info("Live2D 已连接")
+        return True
+
+    if args is None:
+        args = parse_args()
+
+    logger.info("正在初始化 Live2D...")
+
+    if live2d_manager is None:
+        from live2d.live2d_controller_manager import Live2DConfig, Live2DControllerManager
+        config = Live2DConfig(
+            sensitivity=args.live2d_sensitivity,
+            response_speed=args.live2d_speed,
+            motion_smoothness=args.live2d_smoothness,
+            eye_tracking_enabled=args.live2d_eye_tracking,
+            expression_enabled=args.live2d_expression
+        )
+        live2d_manager = Live2DControllerManager(config)
+
+    try:
+        connected = await live2d_manager.connect(
+            host=args.live2d_host,
+            port=args.live2d_port
+        )
+        if connected:
+            args.live2d = True
+            logger.info("Live2D 已启用")
+            if langgraph_manager:
+                langgraph_manager.rebuild_graph(enable_live2d=True)
+            return True
+        else:
+            logger.warning("Live2D 连接失败")
+            return False
+    except Exception as e:
+        logger.error(f"Live2D 初始化失败: {e}")
+        return False
+
+
+async def disable_live2d():
+    """禁用 Live2D 功能"""
+    global args, live2d_manager
+
+    if not (args and args.live2d):
+        logger.info("Live2D 未启用")
+        return True
+
+    logger.info("正在禁用 Live2D...")
+
+    if live2d_manager and live2d_manager.is_connected:
+        await live2d_manager.disconnect()
+
+    args.live2d = False
+    logger.info("Live2D 已禁用")
+
+    if langgraph_manager:
+        langgraph_manager.rebuild_graph(enable_live2d=False)
+
+    return True
+
+
+async def enable_tts():
+    """启用 TTS 功能"""
+    global args
+
+    if not tts_available:
+        logger.error("TTS 模块不可用")
+        return False
+
+    if args is None:
+        args = parse_args()
+
+    if args.tts:
+        logger.info("TTS 已启用")
+        return True
+
+    args.tts = True
+    logger.info("TTS 已启用")
+
+    if langgraph_manager:
+        langgraph_manager.rebuild_graph(enable_tts=True)
+
+    return True
+
+
+async def disable_tts():
+    """禁用 TTS 功能"""
+    global args
+
+    if not (args and args.tts):
+        logger.info("TTS 未启用")
+        return True
+
+    args.tts = False
+    logger.info("TTS 已禁用")
+
+    if langgraph_manager:
+        langgraph_manager.rebuild_graph(enable_tts=False)
+
+    return True
+
+
+async def start_danmaku_listener():
+    """启动弹幕监听器"""
+    global args, _bili_process
+
+    if _bili_process and _bili_process.poll() is None:
+        logger.info("弹幕监听器已在运行")
+        return True
+
+    if args is None:
+        args = parse_args()
+
+    logger.info("正在启动弹幕监听器...")
+    start_bilibili_listener(args.room_id)
+
+    # 等待子进程启动
+    await asyncio.sleep(1)
+
+    if _bili_process and _bili_process.poll() is None:
+        logger.info("弹幕监听器已启动")
+        return True
+    else:
+        logger.error("弹幕监听器启动失败")
+        return False
+
+
+async def stop_danmaku_listener():
+    """停止弹幕监听器"""
+    global _bili_process
+
+    if not _bili_process or _bili_process.poll() is not None:
+        logger.info("弹幕监听器未运行")
+        return True
+
+    logger.info("正在停止弹幕监听器...")
+    try:
+        _bili_process.terminate()
+        try:
+            _bili_process.wait(timeout=3)
+        except Exception:
+            _bili_process.kill()
+            _bili_process.wait(timeout=1)
+        logger.info("弹幕监听器已停止")
+        _bili_process = None
+        return True
+    except Exception as e:
+        logger.error(f"停止弹幕监听器失败: {e}")
+        _bili_process = None
+        return False
+
 async def start_http_server(port=8081):
     """
-    启动HTTP服务器
+    启动HTTP服务器（FastAPI + uvicorn）
 
     Args:
         port: 端口号
+
+    Returns:
+        uvicorn.Server 实例（可用于停止服务器）
     """
-    # 创建aiohttp应用
-    app = web.Application()
+    # 读取配置
+    import configparser as _cp
+    _config = _cp.ConfigParser(interpolation=None)
+    _config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
+    _config.read(_config_path, encoding='utf-8')
 
-    # 添加路由
-    app.add_routes([
-        web.post('/', handle_post_request)
-    ])
+    webui_enabled = True
+    if _config.has_section("webui"):
+        webui_enabled = _config.getboolean("webui", "enabled", fallback=True)
 
-    # 启动服务器
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '', port)
-    await site.start()
+    if not webui_enabled:
+        logger.info("Web UI 控制台未启用 (config.ini [webui] enabled=false)")
+        return None
+
+    # 导入 Web UI 应用
+    from webui.app import app, init_api
+
+    # 初始化 API 模块（注入 config 引用）
+    init_api(config=_config, config_path=_config_path)
+
+    # 使用 uvicorn 启动服务器
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+    server = uvicorn.Server(config)
+
+    # 在后台任务中启动（不阻塞主事件循环）
+    server_task = asyncio.create_task(server.serve())
 
     logger.info(f"HTTP服务器已启动，监听端口 {port}")
+    logger.info(f"Web UI 控制台: http://localhost:{port}/")
+    logger.info(f"API 文档: http://localhost:{port}/docs")
 
-    return runner
+    return server
 
 def start_bilibili_listener(room_id=None):
     """
@@ -774,23 +1136,156 @@ def start_bilibili_listener(room_id=None):
     # 启动监听程序（子进程）
     logger.info(f"启动哔哩哔哩直播监听程序: {' '.join(cmd)}  cwd={broadcast_dir}")
     try:
-        subprocess.Popen(
+        global _bili_process
+        _bili_process = subprocess.Popen(
             cmd,
             cwd=broadcast_dir,
             stdout=None,   # 继承父进程stdout（用户能看到弹幕打印）
             stderr=None,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
         )
     except Exception as e:
         logger.error(f"启动弹幕监听器失败: {e}")
 
+
+def _cleanup_port(port: int):
+    """
+    清理占用指定端口的进程（Windows 环境）
+
+    避免 OSError: [Errno 10048] 端口冲突错误。
+    使用 netstat 查找占用端口的进程 PID，然后终止该进程。
+    同时尝试清理本项目 (bili_main.py / 自身) 的残留子进程。
+
+    Args:
+        port: 需要清理的端口号
+    """
+    if os.name != 'nt':
+        return
+
+    import subprocess
+    import re
+    try:
+        # 中文 Windows 上 netstat / wmic 的输出编码是 GBK，需要显式指定
+        win_encoding = 'gbk'
+        # 精确匹配本端口（避免 :19999 匹配到 :199990 / :199991 等）
+        port_pattern = re.compile(rf':{port}(\s|$)')
+
+        # 1. 找出所有占用该端口的 PID
+        result = subprocess.run(
+            ['netstat', '-ano'],
+            capture_output=True, timeout=5,
+            encoding=win_encoding, errors='replace',
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+        )
+        pids_to_kill = set()
+        my_pid = os.getpid()
+
+        for line in (result.stdout or '').splitlines():
+            if 'LISTENING' not in line:
+                continue
+            if not port_pattern.search(line):
+                continue
+            parts = line.strip().split()
+            if len(parts) < 5:
+                continue
+            try:
+                pid = int(parts[-1])
+            except ValueError:
+                continue
+            if pid != my_pid:
+                pids_to_kill.add(pid)
+
+        # 2. 额外：尝试杀掉所有 bili_main.py 子进程（它们是本项目启动的弹幕监听，可能残留）
+        try:
+            proc_result = subprocess.run(
+                ['wmic', 'process', 'where',
+                 "commandline like '%bili_main%'",
+                 'get', 'processid,commandline'],
+                capture_output=True, timeout=5,
+                encoding=win_encoding, errors='replace',
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+            )
+            for line in (proc_result.stdout or '').splitlines():
+                line = line.strip()
+                if not line or line.startswith('ProcessId') or line.startswith('CommandLine'):
+                    continue
+                for token in line.split():
+                    if token.isdigit() and int(token) != my_pid:
+                        pids_to_kill.add(int(token))
+        except Exception:
+            pass  # wmic 可能在某些系统不可用，忽略
+
+        # 3. 终止这些 PID
+        for pid in sorted(pids_to_kill):
+            logger.info(f"发现端口 {port} 残留 PID {pid}，正在终止...")
+            try:
+                subprocess.run(
+                    ['taskkill', '/PID', str(pid), '/F'],
+                    capture_output=True, timeout=5,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+                )
+            except Exception as e:
+                logger.warning(f"终止 PID {pid} 失败: {e}")
+
+        if pids_to_kill:
+            import time
+            time.sleep(1.0)  # 等待端口释放
+            logger.info(f"已清理端口 {port} 上的 {len(pids_to_kill)} 个残留进程")
+        else:
+            logger.info(f"端口 {port} 未被占用")
+    except Exception as e:
+        logger.warning(f"端口清理失败（可忽略）: {e}")
+
+
 def main():
     """
     主函数
+
+    启动模式：
+    - 默认：仅启动 Web 控制台，功能需通过 UI 手动启动
+    - --all：启动所有功能（Live2D + TTS + 弹幕监听）
+    - --live2d/--tts：启动指定功能
     """
-    global args, langgraph_manager, live2d_manager
+    global args, langgraph_manager, live2d_manager, _bili_process
 
     # 解析命令行参数
     args = parse_args()
+
+    # --all 模式：启用所有功能
+    if args.all:
+        args.live2d = True
+        args.tts = True
+        logger.info("使用 --all 模式：启动所有功能")
+
+    # 加载 config.ini 作为默认值来源（命令行参数优先级更高）
+    config_ini_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
+    _cfg = configparser.ConfigParser(interpolation=None)
+    _cfg.read(config_ini_path, encoding='utf-8')
+
+    # 若命令行未显式指定 --live2d，则读取 config.ini [live2d] enabled
+    if not args.live2d and _cfg.has_section("live2d"):
+        args.live2d = _cfg.getboolean("live2d", "enabled", fallback=False)
+        if args.live2d:
+            logger.info(f"Live2D 已从 config.ini 启用")
+    if not args.live2d_host and _cfg.has_section("live2d"):
+        args.live2d_host = _cfg.get("live2d", "host", fallback="localhost")
+    if args.live2d_port == 8001 and _cfg.has_section("live2d"):
+        args.live2d_port = _cfg.getint("live2d", "port", fallback=8001)
+    if args.live2d_sensitivity == 1.0 and _cfg.has_section("live2d"):
+        args.live2d_sensitivity = _cfg.getfloat("live2d", "sensitivity", fallback=1.0)
+    if args.live2d_speed == 2.5 and _cfg.has_section("live2d"):
+        args.live2d_speed = _cfg.getfloat("live2d", "response_speed", fallback=2.5)
+    if args.live2d_smoothness == 0.8 and _cfg.has_section("live2d"):
+        args.live2d_smoothness = _cfg.getfloat("live2d", "smoothness", fallback=0.8)
+    if _cfg.has_section("live2d"):
+        args.live2d_eye_tracking = _cfg.getboolean("live2d", "eye_tracking", fallback=True)
+        args.live2d_expression = _cfg.getboolean("live2d", "expression", fallback=True)
+
+    # 若命令行未显式指定 --tts，则读取 config.ini [tts] enabled
+    if not args.tts and _cfg.has_section("tts"):
+        args.tts = _cfg.getboolean("tts", "enabled", fallback=False)
+        if args.tts:
+            logger.info("TTS 已从 config.ini 启用")
 
     # 如果未指定 room_id，从 config.json 读取默认值
     if args.room_id is None:
@@ -807,7 +1302,10 @@ def main():
         except Exception as e:
             logger.error(f"读取配置文件失败: {e}")
 
-    logger.info(f"命令行参数: live2d={args.live2d}, tts={args.tts}, room_id={args.room_id}")
+    # 清理可能占用的端口（避免 OSError: [Errno 10048]）
+    _cleanup_port(8081)
+
+    logger.info(f"启动模式: live2d={args.live2d}, tts={args.tts}, all={args.all}, room_id={args.room_id}")
 
     async def run_async():
         logger.info("=== 启动 LangGraph 主程序 ===")
@@ -816,6 +1314,41 @@ def main():
         if not os.getenv("Doubao_API_KEY"):
             logger.warning("警告: 环境变量 Doubao_API_KEY 未设置")
             logger.warning("将使用模拟响应进行测试")
+
+        # 加载浏览器工具配置并启动浏览器
+        browser_enabled = False
+        try:
+            import configparser
+            config = configparser.ConfigParser(interpolation=None)
+            config_ini_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
+            config.read(config_ini_path, encoding='utf-8')
+
+            if config.has_section("browser") and config.getboolean("browser", "enabled", fallback=False):
+                from tool.browser_tool import browser_manager, configure_from_ini
+                configure_from_ini(config)
+                await browser_manager.start(headless=config.getboolean("browser", "headless", fallback=True))
+                browser_enabled = True
+                logger.info("浏览器工具已启用")
+            else:
+                logger.info("浏览器工具未启用（config.ini [browser] enabled=false 或无配置）")
+        except Exception as e:
+            logger.warning(f"浏览器工具初始化失败（不影响主程序运行）: {e}")
+
+        # 加载视觉分析工具配置
+        try:
+            import configparser
+            config = configparser.ConfigParser(interpolation=None)
+            config_ini_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
+            config.read(config_ini_path, encoding='utf-8')
+
+            if config.has_section("vision") and config.getboolean("vision", "enabled", fallback=False):
+                from tool.vision_tool import configure_from_ini as vision_configure
+                vision_configure(config)
+                logger.info("视觉分析工具已启用")
+            else:
+                logger.info("视觉分析工具未启用（config.ini [vision] enabled=false 或无配置）")
+        except Exception as e:
+            logger.warning(f"视觉分析工具初始化失败（不影响主程序运行）: {e}")
 
         # 初始化 Live2D 管理器
         if args.live2d and live2d_available:
@@ -842,30 +1375,47 @@ def main():
                     logger.info("Live2D 控制器连接成功")
                 else:
                     logger.warning("Live2D 控制器连接失败")
+                    args.live2d = False  # 连接失败时重置标记
+                    live2d_manager = None
             except Exception as e:
                 logger.error(f"Live2D 控制器初始化失败: {e}")
+                args.live2d = False  # 异常时重置标记
                 live2d_manager = None
 
         # 创建 LangGraph 管理器
         global langgraph_manager
         langgraph_manager = LangGraphManager()
 
-        # 构建图
+        # 构建图（基础结构 + 可选功能节点）
         langgraph_manager.build_graph(
-            enable_tts=args.tts,
-            enable_live2d=args.live2d and live2d_available
+            enable_tts=args.tts if args else False,
+            enable_live2d=args.live2d and live2d_available if args else False
         )
 
-        # 启动HTTP服务器
-        runner = await start_http_server()
-
-        # 初始化消息队列并启动 worker（串行处理弹幕，避免 Live2D/TTS 并发冲突）
+        # 初始化消息队列并启动 worker（必须在 HTTP 服务器启动前初始化，否则 API 调用时队列为空）
         global _message_queue, _queue_worker_task
         _message_queue = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
         _queue_worker_task = asyncio.create_task(_queue_worker())
 
-        # 启动哔哩哔哩直播监听程序
-        start_bilibili_listener(args.room_id)
+        # 启动HTTP服务器（Web 控制台）
+        runner = await start_http_server()
+        logger.info("Web 控制台已启动，可通过 UI 控制功能")
+
+        # 启动时自动启用的功能（通过 --all 或 config.ini 配置）
+        auto_start_features = args.all if args else False
+
+        # 如果 Live2D 在启动时已启用（通过 --all 或 config.ini），等待连接完成
+        if args and args.live2d and live2d_available:
+            logger.info("Live2D 将在启动时自动启用")
+        elif not args or not args.live2d:
+            logger.info("Live2D 未在启动时启用，可通过控制台手动启动")
+
+        # 如果使用 --all 模式，自动启动弹幕监听
+        if auto_start_features and args and args.room_id:
+            start_bilibili_listener(args.room_id)
+            logger.info("弹幕监听器已通过 --all 模式启动")
+        else:
+            logger.info("弹幕监听器未自动启动，可通过控制台手动启动")
 
         try:
             # 持续运行
@@ -879,6 +1429,21 @@ def main():
             import traceback
             traceback.print_exc()
         finally:
+            # 终止弹幕监听子进程，避免残留占用端口
+            global _bili_process
+            if _bili_process is not None:
+                try:
+                    _bili_process.terminate()
+                    try:
+                        _bili_process.wait(timeout=3)
+                    except Exception:
+                        _bili_process.kill()
+                        _bili_process.wait(timeout=1)
+                    logger.info("弹幕监听子进程已终止")
+                except Exception as e:
+                    logger.warning(f"终止弹幕监听子进程失败: {e}")
+                _bili_process = None
+
             # 取消队列 worker
             if _queue_worker_task and not _queue_worker_task.done():
                 _queue_worker_task.cancel()
@@ -887,6 +1452,14 @@ def main():
                 except asyncio.CancelledError:
                     pass
                 logger.info("消息队列 worker 已停止")
+
+            # 关闭浏览器
+            if browser_enabled:
+                try:
+                    from tool.browser_tool import browser_manager
+                    await browser_manager.stop()
+                except Exception as e:
+                    logger.warning(f"关闭浏览器失败: {e}")
 
             # 关闭 Live2D 连接
             if live2d_manager:

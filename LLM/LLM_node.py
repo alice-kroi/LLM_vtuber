@@ -11,6 +11,7 @@
 """
 
 import logging
+import json
 
 from typing_extensions import TypedDict
 from langchain_core.messages import AnyMessage
@@ -19,6 +20,49 @@ from typing import Optional
 from chat_model import ChatState, doubao_chat_node
 
 logger = logging.getLogger(__name__)
+
+# 工具 Schema（延迟导入避免循环依赖）
+_BROWSER_TOOLS = None
+_VISION_TOOLS = None
+_ALL_TOOLS = None
+
+
+def _get_browser_tools():
+    """延迟获取浏览器工具 Schema"""
+    global _BROWSER_TOOLS
+    if _BROWSER_TOOLS is None:
+        try:
+            from tool.browser_tool import BROWSER_TOOLS_SCHEMA
+            _BROWSER_TOOLS = BROWSER_TOOLS_SCHEMA
+        except ImportError:
+            _BROWSER_TOOLS = []
+            logger.warning("browser_tool 模块未安装，浏览器工具不可用")
+    return _BROWSER_TOOLS
+
+
+def _get_vision_tools():
+    """延迟获取视觉分析工具 Schema"""
+    global _VISION_TOOLS
+    if _VISION_TOOLS is None:
+        try:
+            from tool.vision_tool import VISION_TOOLS_SCHEMA
+            _VISION_TOOLS = VISION_TOOLS_SCHEMA
+        except ImportError:
+            _VISION_TOOLS = []
+            logger.warning("vision_tool 模块未安装，视觉分析工具不可用")
+    return _VISION_TOOLS
+
+
+def _get_all_tools():
+    """获取所有可用工具 Schema（浏览器 + 视觉）"""
+    global _ALL_TOOLS
+    if _ALL_TOOLS is None:
+        all_tools = []
+        all_tools.extend(_get_browser_tools())
+        all_tools.extend(_get_vision_tools())
+        _ALL_TOOLS = all_tools
+        logger.info(f"已加载 {len(all_tools)} 个工具 Schema")
+    return _ALL_TOOLS
 
 
 class LLMState(ChatState):
@@ -48,9 +92,9 @@ def _extract_last_user_question(state: LLMState) -> Optional[str]:
     return None
 
 
-def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
+async def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
     """
-    统一的豆包聊天执行逻辑。
+    统一的豆包聊天执行逻辑（异步，支持工具调用循环）。
 
     Args:
         state: LLM 状态
@@ -80,7 +124,52 @@ def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
             name=state.get("name")
         )
 
-        result = doubao_chat_node(chat_state)
+        # 第一轮调用（可能返回 tool_calls）
+        tools = _get_all_tools()
+        result = doubao_chat_node(chat_state, tools=tools if tools else None)
+
+        # 如果 LLM 返回了 tool_calls，执行工具后再次调用 LLM
+        tool_calls = result.get("tool_calls")
+        if tool_calls:
+            logger.info(f"[LLM] 检测到 {len(tool_calls)} 个工具调用: "
+                        f"{[tc['name'] for tc in tool_calls]}")
+
+            # 执行工具调用
+            tool_results = await _execute_tool_calls(tool_calls)
+
+            # 将 assistant 的 tool_call 消息和 tool 结果消息加入历史
+            new_messages = list(chat_state.get("messages", []))
+            # assistant 消息（带 tool_calls）
+            new_messages.append({
+                "role": "assistant",
+                "content": result.get("response") or "",
+                "tool_calls": [
+                    {
+                        "id": tc["tool_call_id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc["arguments"], ensure_ascii=False)
+                        }
+                    }
+                    for tc in tool_calls
+                ]
+            })
+            # tool 结果消息
+            for tr in tool_results:
+                new_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tr["tool_call_id"],
+                    "content": json.dumps(tr["result"], ensure_ascii=False)
+                        if tr.get("result") is not None
+                        else (tr.get("error") or "工具执行失败")
+                })
+
+            chat_state["messages"] = new_messages
+
+            # 第二轮调用（不再传 tools，让模型直接生成最终回复）
+            logger.info("[LLM] 工具执行完毕，进行第二轮 LLM 调用")
+            result = doubao_chat_node(chat_state, tools=None)
 
         return {
             **state,
@@ -101,14 +190,33 @@ def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
         }
 
 
-def llm_chat_node(state: LLMState) -> LLMState:
+async def _execute_tool_calls(tool_calls: list) -> list:
+    """执行工具调用列表，返回结果列表"""
+    from tool.tool_node import tool_registry
+
+    results = []
+    for tc in tool_calls:
+        tool_call = {
+            "tool_call_id": tc["tool_call_id"],
+            "name": tc["name"],
+            "arguments": tc["arguments"]
+        }
+        logger.info(f"[LLM] 执行工具: {tc['name']}(args={tc['arguments']})")
+        result = await tool_registry.execute_tool(tool_call, timeout=60.0)
+        results.append(result)
+        logger.info(f"[LLM] 工具结果: {tc['name']} -> "
+                    f"{'成功' if result.get('result') else '失败'}")
+    return results
+
+
+async def llm_chat_node(state: LLMState) -> LLMState:
     """大模型对话节点（不带RAG上下文增强）"""
-    return _run_doubao_chat(state, with_context=False)
+    return await _run_doubao_chat(state, with_context=False)
 
 
-def context_aware_qa_node(state: LLMState) -> LLMState:
+async def context_aware_qa_node(state: LLMState) -> LLMState:
     """上下文感知的问题回答节点（拼上 state['context'] 后调用 LLM）"""
-    return _run_doubao_chat(state, with_context=True)
+    return await _run_doubao_chat(state, with_context=True)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,1177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM_vtuber 控制台</title>
+<style>
+  :root {
+    --fastapi-primary: #1098ad;
+    --fastapi-primary-dark: #005f73;
+    --fastapi-accent: #00bfb3;
+    --bg-body: #f5f6f8;
+    --bg-surface: #ffffff;
+    --bg-sidebar: #ffffff;
+    --bg-header: #ffffff;
+    --bg-hover: #f0f4f8;
+    --bg-active: #e8f4f6;
+    --border: #e0e4ea;
+    --border-light: #edf0f4;
+    --text-primary: #2c3e50;
+    --text-secondary: #6c757d;
+    --text-muted: #95a5a6;
+    --text-on-dark: #ffffff;
+    --success: #28a745;
+    --danger: #dc3545;
+    --warning: #f0ad4e;
+    --shadow-sm: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+    --radius: 6px;
+    --radius-lg: 10px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+                 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+    background: var(--bg-body);
+    color: var(--text-primary);
+    min-height: 100vh;
+    overflow-x: hidden;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .app { display: flex; min-height: 100vh; }
+
+  /* Sidebar — FastAPI white sidebar style */
+  .sidebar {
+    width: 220px;
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 20px 0;
+  }
+  .logo {
+    padding: 0 20px 20px;
+    border-bottom: 1px solid var(--border-light);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .logo-icon {
+    width: 36px; height: 36px;
+    background: var(--fastapi-primary);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+    color: #fff;
+  }
+  .logo-text { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+  .logo-sub { font-size: 11px; color: var(--text-muted); }
+
+  .nav { flex: 1; padding: 10px 8px; }
+  .nav-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: all 0.15s;
+    margin-bottom: 2px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+    user-select: none;
+  }
+  .nav-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+  .nav-item.active {
+    background: var(--bg-active);
+    color: var(--fastapi-primary-dark);
+    font-weight: 600;
+  }
+  .nav-item.active .nav-icon { color: var(--fastapi-primary); }
+  .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+  .sidebar-footer {
+    padding: 15px 20px;
+    border-top: 1px solid var(--border-light);
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .status-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    background: var(--success);
+  }
+  .status-dot.offline { background: var(--danger); }
+
+  /* Main Content */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .header {
+    padding: 14px 28px;
+    background: var(--bg-header);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .header-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+  .header-info { display: flex; gap: 20px; font-size: 13px; color: var(--text-secondary); }
+  .header-info span { display: flex; align-items: center; gap: 6px; }
+
+  .content { flex: 1; padding: 24px 28px; overflow-y: auto; }
+  .page { display: none; }
+  .page.active { display: block; }
+
+  /* Cards — clean FastAPI card style */
+  .card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    margin-bottom: 16px;
+    box-shadow: var(--shadow-sm);
+  }
+  .card-title {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+  .card-title::before {
+    content: '';
+    width: 3px; height: 13px;
+    background: var(--fastapi-primary);
+    border-radius: 2px;
+  }
+
+  /* Status Cards Grid */
+  .status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .status-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 18px;
+    transition: box-shadow 0.2s, border-color 0.2s;
+    box-shadow: var(--shadow-sm);
+  }
+  .status-card:hover {
+    border-color: var(--fastapi-primary);
+    box-shadow: var(--shadow-md);
+  }
+  .status-card-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 10px;
+  }
+  .status-card-title { font-size: 12px; color: var(--text-secondary); font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; }
+  .status-indicator {
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .status-indicator.online {
+    background: rgba(40, 167, 69, 0.1);
+    color: var(--success);
+  }
+  .status-indicator.offline {
+    background: rgba(220, 53, 69, 0.1);
+    color: var(--danger);
+  }
+  .status-indicator.warning {
+    background: rgba(240, 173, 78, 0.1);
+    color: var(--warning);
+  }
+  .status-card-value {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+  .status-card-sub {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 4px;
+  }
+
+  /* Message Stream */
+  .message-stream {
+    height: 400px;
+    overflow-y: auto;
+    padding: 12px;
+    background: #fafbfc;
+    border-radius: var(--radius);
+    border: 1px solid var(--border-light);
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  }
+  .message-item {
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    margin-bottom: 6px;
+    font-size: 13px;
+    line-height: 1.5;
+    transition: background 0.15s;
+  }
+  .message-item.danmaku {
+    background: #e3f2fd;
+    border-left: 3px solid #1976d2;
+  }
+  .message-item.ai_response {
+    background: #f3e5f5;
+    border-left: 3px solid #7b1fa2;
+  }
+  .message-item.system {
+    background: #eceff1;
+    border-left: 3px solid #546e7a;
+  }
+  .message-item.vision {
+    background: #fff3e0;
+    border-left: 3px solid #f57c00;
+  }
+  .message-meta { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
+  .message-content { color: var(--text-primary); }
+  .message-tone {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 10px;
+    margin-right: 6px;
+    background: rgba(0,0,0,0.08);
+    color: var(--text-secondary);
+  }
+
+  /* Forms */
+  .form-group { margin-bottom: 16px; }
+  .form-label {
+    display: block;
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+    font-weight: 500;
+  }
+  .form-input, .form-select, .form-textarea {
+    width: 100%;
+    padding: 8px 12px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-size: 13px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    font-family: inherit;
+  }
+  .form-input:focus, .form-select:focus, .form-textarea:focus {
+    outline: none;
+    border-color: var(--fastapi-primary);
+    box-shadow: 0 0 0 3px rgba(16, 152, 173, 0.15);
+  }
+  .form-textarea { resize: vertical; min-height: 80px; }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px 18px;
+    background: var(--fastapi-primary);
+    border: 1px solid var(--fastapi-primary);
+    border-radius: var(--radius);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, box-shadow 0.15s, transform 0.1s;
+    text-decoration: none;
+  }
+  .btn:hover { background: var(--fastapi-primary-dark); border-color: var(--fastapi-primary-dark); box-shadow: 0 2px 6px rgba(16, 152, 173, 0.25); }
+  .btn:active { transform: translateY(1px); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
+  .btn-secondary {
+    background: #fff;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+  }
+  .btn-secondary:hover { background: var(--bg-hover); border-color: var(--border); box-shadow: none; color: var(--text-primary); }
+  .btn-danger { background: var(--danger); border-color: var(--danger); }
+  .btn-danger:hover { background: #c82333; border-color: #c82333; }
+
+  .form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  /* Quick Actions */
+  .action-bar {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+
+  /* Vision Panel */
+  .window-list {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 16px;
+    background: #fff;
+  }
+  .window-item {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-light);
+    cursor: pointer;
+    transition: background 0.15s;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .window-item:last-child { border-bottom: none; }
+  .window-item:hover { background: var(--bg-hover); }
+  .window-item.selected { background: var(--bg-active); border-left: 3px solid var(--fastapi-primary); }
+  .window-title { font-size: 13px; color: var(--text-primary); }
+  .window-size { font-size: 11px; color: var(--text-muted); }
+
+  .vision-result {
+    margin-top: 16px;
+    padding: 16px;
+    background: #fff8e1;
+    border: 1px solid #ffe082;
+    border-radius: var(--radius);
+  }
+  .vision-result h4 { color: #e65100; margin-bottom: 8px; }
+  .vision-result p { font-size: 13px; line-height: 1.6; white-space: pre-wrap; color: var(--text-primary); }
+
+  /* Tabs within page */
+  .tabs {
+    display: flex;
+    gap: 0;
+    margin-bottom: 16px;
+    border-bottom: 2px solid var(--border-light);
+  }
+  .tab {
+    padding: 10px 20px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-secondary);
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: color 0.15s, border-color 0.15s;
+    font-weight: 500;
+  }
+  .tab:hover { color: var(--text-primary); }
+  .tab.active { color: var(--fastapi-primary); border-bottom-color: var(--fastapi-primary); font-weight: 600; }
+
+  /* Toast */
+  .toast {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 12px 20px;
+    background: var(--success);
+    color: #fff;
+    border-radius: var(--radius);
+    font-size: 14px;
+    z-index: 1000;
+    box-shadow: var(--shadow-md);
+    display: none;
+  }
+  .toast.error { background: var(--danger); }
+  .toast.show { display: block; }
+
+  /* Scrollbar — clean slim style */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e0; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #a0aec0; }
+
+  /* Loading spinner */
+  .spinner {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--fastapi-primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Config table */
+  .config-section { margin-bottom: 24px; }
+  .config-section h3 {
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-light);
+    font-weight: 600;
+  }
+  .config-item {
+    display: grid;
+    grid-template-columns: 180px 1fr auto;
+    gap: 12px;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-light);
+  }
+  .config-key { font-size: 13px; color: var(--text-secondary); font-weight: 500; }
+  .config-val { font-size: 13px; }
+  .config-val input {
+    width: 100%;
+    padding: 6px 10px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-size: 13px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .config-val input:focus { outline: none; border-color: var(--fastapi-primary); box-shadow: 0 0 0 3px rgba(16, 152, 173, 0.15); }
+
+  .toast-container {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  /* Log entries — mono font, code-like */
+  .log-entry {
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border-light);
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .log-entry:hover { background: var(--bg-hover); }
+
+  /* Feature grid */
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-icon">🎭</div>
+      <div>
+        <div class="logo-text">LLM_vtuber</div>
+        <div class="logo-sub">控制台</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <div class="nav-item active" data-page="dashboard">
+        <span class="nav-icon">📊</span> 仪表盘
+      </div>
+      <div class="nav-item" data-page="control">
+        <span class="nav-icon">🎛️</span> 控制
+      </div>
+      <div class="nav-item" data-page="messages">
+        <span class="nav-icon">📨</span> 消息
+      </div>
+      <div class="nav-item" data-page="logs">
+        <span class="nav-icon">📋</span> 日志
+      </div>
+      <div class="nav-item" data-page="config">
+        <span class="nav-icon">⚙️</span> 配置
+      </div>
+      <div class="nav-item" data-page="vision">
+        <span class="nav-icon">👁️</span> 视觉
+      </div>
+    </nav>
+    <div class="sidebar-footer">
+      <div><span class="status-dot" id="sidebarStatus"></span><span id="sidebarStatusText">连接中...</span></div>
+      <div style="margin-top:4px;">v1.0 · 端口 8081</div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <div class="main">
+    <div class="header">
+      <div class="header-title" id="pageTitle">仪表盘</div>
+      <div class="header-info">
+        <span>⏱️ <span id="uptime">0s</span></span>
+        <span>📨 已处理 <span id="msgCount">0</span></span>
+        <span>🔗 WS <span id="wsCount">0</span></span>
+      </div>
+    </div>
+
+    <div class="content">
+      <!-- Dashboard Page -->
+      <div class="page active" id="page-dashboard">
+        <div class="status-grid" id="statusGrid">
+          <!-- Status cards injected by JS -->
+        </div>
+
+        <div class="action-bar">
+          <button class="btn" onclick="sendTestMessage()">💬 发送测试消息</button>
+          <button class="btn btn-secondary" onclick="refreshStatus()">🔄 刷新状态</button>
+        </div>
+
+        <div class="card">
+          <div class="card-title">实时消息流</div>
+          <div class="message-stream" id="messageStream">
+            <div style="text-align:center; color:#666; padding:40px;">等待消息...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Messages Page -->
+      <div class="page" id="page-messages">
+        <div class="card">
+          <div class="card-title">消息历史</div>
+          <div class="tabs">
+            <div class="tab active" data-filter="all">全部</div>
+            <div class="tab" data-filter="danmaku">弹幕</div>
+            <div class="tab" data-filter="ai_response">AI 回复</div>
+            <div class="tab" data-filter="vision">视觉</div>
+            <div class="tab" data-filter="system">系统</div>
+          </div>
+          <div class="action-bar">
+            <button class="btn btn-secondary" onclick="loadMessages()">🔄 加载历史</button>
+            <button class="btn btn-secondary" onclick="document.getElementById('testMsgBox').style.display='flex'">💬 发送测试</button>
+          </div>
+          <div id="testMsgBox" style="display:none; gap:10px; margin-bottom:16px; align-items:flex-end;">
+            <div style="flex:1;">
+              <div class="form-group"><label class="form-label">用户名</label><input class="form-input" id="testUserName" value="测试用户"></div>
+              <div class="form-group"><label class="form-label">消息内容</label><input class="form-input" id="testMsgContent" value="你好呀！"></div>
+            </div>
+            <button class="btn" onclick="doSendTest()">发送</button>
+          </div>
+          <div class="message-stream" id="messageHistoryStream" style="height:500px;">
+            <div style="text-align:center; color:#666; padding:40px;">点击"加载历史"获取消息</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Config Page -->
+      <div class="page" id="page-config">
+        <div class="card">
+          <div class="card-title">配置管理</div>
+          <div id="configContent">
+            <div style="text-align:center; color:#666; padding:40px;">加载配置中...</div>
+          </div>
+          <div style="margin-top:16px; display:flex; gap:10px;">
+            <button class="btn" onclick="saveConfig()">💾 保存修改</button>
+            <button class="btn btn-secondary" onclick="loadConfig()">↩️ 重新加载</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Vision Page -->
+      <div class="page" id="page-vision">
+        <div class="card">
+          <div class="card-title">视觉分析</div>
+          <div class="action-bar">
+            <button class="btn" onclick="loadWindows()">🔍 列出窗口</button>
+            <button class="btn btn-secondary" onclick="doVisionAnalyze('desktop')">🖼️ 全屏截图分析</button>
+          </div>
+          <div id="windowList" class="window-list" style="display:none;"></div>
+          <div class="form-group">
+            <label class="form-label">自定义提示词（可选）</label>
+            <input class="form-input" id="visionPrompt" placeholder="例如：描述窗口中的文字内容">
+          </div>
+          <div id="visionResult"></div>
+        </div>
+      </div>
+
+      <!-- Control Page -->
+      <div class="page" id="page-control">
+        <div class="card">
+          <div class="card-title">功能控制</div>
+          <div id="featureGrid" class="status-grid">
+            <!-- Feature cards injected by JS -->
+          </div>
+          <div style="margin-top:16px; display:flex; gap:10px;">
+            <button class="btn" onclick="refreshFeatures()">🔄 刷新状态</button>
+            <button class="btn btn-secondary" onclick="startAllFeatures()">▶️ 启动全部</button>
+            <button class="btn btn-secondary" onclick="stopAllFeatures()">⏹️ 停止全部</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Logs Page -->
+      <div class="page" id="page-logs">
+        <div class="card">
+          <div class="card-title">系统日志</div>
+          <div style="display:flex; gap:12px; margin-bottom:16px; align-items:center; flex-wrap:wrap;">
+            <div style="display:flex; align-items:center; gap:6px;">
+              <label class="form-label">级别:</label>
+              <select id="logLevelFilter" class="form-input" style="width:120px;">
+                <option value="">全部</option>
+                <option value="INFO">INFO</option>
+                <option value="WARNING">WARNING</option>
+                <option value="ERROR">ERROR</option>
+                <option value="CRITICAL">CRITICAL</option>
+              </select>
+            </div>
+            <div style="display:flex; align-items:center; gap:6px;">
+              <label class="form-label">模块:</label>
+              <input id="logLoggerFilter" class="form-input" style="width:180px;" placeholder="筛选模块名">
+            </div>
+            <button class="btn" onclick="loadLogs()">🔍 查询</button>
+            <button class="btn btn-secondary" onclick="document.getElementById('logBuffer').innerHTML=''">🗑️ 清空显示</button>
+            <label style="display:flex; align-items:center; gap:6px; margin-left:auto;">
+              <input type="checkbox" id="logAutoRefresh" checked onchange="toggleLogAutoRefresh()">
+              <span style="font-size:13px;">自动刷新</span>
+            </label>
+          </div>
+          <div id="logBuffer" class="message-stream" style="height:550px; font-family: 'Consolas', 'Monaco', monospace; font-size:12px;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+// ============ 状态 ============
+let ws = null;
+let reconnectTimer = null;
+let currentFilter = 'all';
+let configData = {};
+let uptimeTimer = null;
+
+// ============ 导航 ============
+document.querySelectorAll('.nav-item').forEach(item => {
+  item.addEventListener('click', () => {
+    document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    item.classList.add('active');
+    document.getElementById('page-' + item.dataset.page).classList.add('active');
+    document.getElementById('pageTitle').textContent = item.textContent.trim();
+  });
+});
+
+// ============ Toast ============
+function showToast(msg, type = 'success') {
+  const toast = document.createElement('div');
+  toast.className = 'toast' + (type === 'error' ? ' error' : '');
+  toast.textContent = msg;
+  document.getElementById('toastContainer').appendChild(toast);
+  setTimeout(() => { toast.style.opacity = '0'; toast.style.transition = 'opacity 0.3s'; }, 3000);
+  setTimeout(() => toast.remove(), 3500);
+}
+
+// ============ 状态面板 ============
+function renderStatusCards(status) {
+  const grid = document.getElementById('statusGrid');
+  const live2dStatus = status.live2d.status || (status.live2d.enabled ? (status.live2d.connected ? 'connected' : 'connection_failed') : 'not_enabled');
+  const live2dStatusText = {
+    'not_enabled': '未启用',
+    'connection_failed': '连接失败',
+    'connected': '已连接',
+  }[live2dStatus] || '未知';
+
+  const cards = [
+    { title: 'Live2D', value: live2dStatusText, sub: `${status.live2d.host}:${status.live2d.port}`, online: live2dStatus === 'connected' },
+    { title: 'TTS 语音', value: status.tts.enabled ? '就绪' : '未启用', sub: `端口 ${status.tts.port}`, online: status.tts.enabled },
+    { title: '弹幕监听', value: '运行中', sub: `房间 ${status.danmaku.room_id}`, online: true },
+    { title: 'AI 模型', value: status.model.name.replace('doubao-', ''), sub: `温度 ${status.model.temperature}`, online: true },
+    { title: '消息队列', value: status.queue.size, sub: `上限 ${status.queue.max_size}`, online: status.queue.size < status.queue.max_size },
+    { title: '已处理消息', value: status.messages_processed, sub: '累计', online: true },
+  ];
+  grid.innerHTML = cards.map(c => `
+    <div class="status-card">
+      <div class="status-card-header">
+        <div class="status-card-title">${c.title}</div>
+        <div class="status-indicator ${c.online ? 'online' : 'offline'}">${c.online ? '● 正常' : '● 异常'}</div>
+      </div>
+      <div class="status-card-value">${c.value}</div>
+      <div class="status-card-sub">${c.sub}</div>
+    </div>
+  `).join('');
+
+  document.getElementById('msgCount').textContent = status.messages_processed;
+  document.getElementById('wsCount').textContent = status.ws_connections;
+}
+
+async function refreshStatus() {
+  try {
+    const resp = await fetch('/api/status');
+    const status = await resp.json();
+    renderStatusCards(status);
+  } catch(e) { console.error(e); }
+}
+
+// ============ 消息 ============
+function addMessage(data, streamId = 'messageStream') {
+  const stream = document.getElementById(streamId);
+  if (!stream) return;
+  if (stream.querySelector('.message-item') === null && stream.children.length === 1) {
+    stream.innerHTML = '';
+  }
+
+  const item = document.createElement('div');
+  item.className = 'message-item ' + data.type;
+
+  const time = new Date(data.timestamp * 1000);
+  const timeStr = time.toLocaleTimeString('zh-CN', { hour12: false });
+
+  let meta = `<div class="message-meta">[${timeStr}]`;
+  if (data.type === 'danmaku') meta += ` ${data.data.username || '匿名'}`;
+  if (data.type === 'ai_response' && data.data.tone) meta += ` <span class="message-tone">${data.data.tone}</span>`;
+  meta += '</div>';
+
+  let content = '';
+  if (data.type === 'danmaku') content = data.data.content || '';
+  else if (data.type === 'ai_response') content = data.data.content || data.data.analysis || '';
+  else if (data.type === 'system') content = data.data.message || data.data.status || '';
+  else if (data.type === 'vision') content = data.data.analysis || (data.data.success ? '分析完成' : '分析失败');
+
+  item.innerHTML = meta + '<div class="message-content">' + content + '</div>';
+  stream.appendChild(item);
+  stream.scrollTop = stream.scrollHeight;
+
+  // 限制数量
+  while (stream.children.length > 100) {
+    stream.removeChild(stream.firstChild);
+  }
+}
+
+async function loadMessages() {
+  try {
+    const resp = await fetch('/api/messages?limit=100');
+    const result = await resp.json();
+    const stream = document.getElementById('messageHistoryStream');
+    stream.innerHTML = '';
+    result.messages.forEach(m => addMessage(m, 'messageHistoryStream'));
+  } catch(e) { console.error(e); }
+}
+
+async function sendTestMessage() {
+  const content = prompt('请输入测试消息内容:', '你好呀！');
+  if (!content) return;
+  try {
+    await fetch('/api/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, name: '测试用户' })
+    });
+    showToast('测试消息已发送');
+  } catch(e) { showToast('发送失败', 'error'); }
+}
+
+async function doSendTest() {
+  const name = document.getElementById('testUserName').value || '测试用户';
+  const content = document.getElementById('testMsgContent').value || '你好';
+  try {
+    await fetch('/api/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, name })
+    });
+    showToast('消息已发送');
+  } catch(e) { showToast('发送失败', 'error'); }
+}
+
+// ============ 配置 ============
+async function loadConfig() {
+  try {
+    const resp = await fetch('/api/config');
+    configData = await resp.json();
+    const container = document.getElementById('configContent');
+    container.innerHTML = '';
+
+    for (const [section, values] of Object.entries(configData)) {
+      const div = document.createElement('div');
+      div.className = 'config-section';
+      let rows = '';
+      for (const [key, val] of Object.entries(values)) {
+        rows += `
+          <div class="config-item">
+            <span class="config-key">${key}</span>
+            <div class="config-val"><input type="text" value="${val}" data-section="${section}" data-key="${key}"></div>
+          </div>
+        `;
+      }
+      div.innerHTML = `<h3>[${section}]</h3>${rows}`;
+      container.appendChild(div);
+    }
+  } catch(e) { console.error(e); }
+}
+
+async function saveConfig() {
+  const updates = {};
+  document.querySelectorAll('#configContent input').forEach(input => {
+    const section = input.dataset.section;
+    const key = input.dataset.key;
+    if (!updates[section]) updates[section] = {};
+    updates[section][key] = input.value;
+  });
+  try {
+    const resp = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates)
+    });
+    const result = await resp.json();
+    if (result.success) showToast('配置已保存');
+    else showToast(result.error || '保存失败', 'error');
+  } catch(e) { showToast('保存失败', 'error'); }
+}
+
+// ============ 视觉 ============
+async function loadWindows() {
+  try {
+    const resp = await fetch('/api/windows');
+    const result = await resp.json();
+    const list = document.getElementById('windowList');
+    list.style.display = 'block';
+    list.innerHTML = '';
+    if (!result.windows.length) {
+      list.innerHTML = '<div style="padding:20px; color:#666; text-align:center;">未检测到可见窗口</div>';
+      return;
+    }
+    result.windows.slice(0, 50).forEach((w, i) => {
+      const item = document.createElement('div');
+      item.className = 'window-item';
+      item.innerHTML = `
+        <span class="window-title">${w.title}</span>
+        <span class="window-size">${w.width}×${w.height}</span>
+      `;
+      item.onclick = () => {
+        document.querySelectorAll('.window-item').forEach(el => el.classList.remove('selected'));
+        item.classList.add('selected');
+        item.dataset.selected = w.title;
+      };
+      list.appendChild(item);
+    });
+  } catch(e) { showToast('获取窗口列表失败', 'error'); }
+}
+
+async function doVisionAnalyze(target) {
+  let windowTitle = target;
+  if (!windowTitle || windowTitle === 'desktop') {
+    const selected = document.querySelector('.window-item.selected');
+    if (selected) {
+      windowTitle = 'window:' + selected.dataset.selected;
+    } else {
+      windowTitle = 'desktop';
+    }
+  }
+  const prompt = document.getElementById('visionPrompt').value;
+
+  const resultDiv = document.getElementById('visionResult');
+  resultDiv.innerHTML = '<div class="vision-result"><h4>⏳ 分析中...</h4></div>';
+
+  try {
+    await fetch('/api/vision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target: windowTitle, prompt })
+    });
+    showToast('视觉分析已触发');
+  } catch(e) {
+    resultDiv.innerHTML = '<div class="vision-result"><h4 style="color:#f44336;">❌ 请求失败</h4></div>';
+    showToast('请求失败', 'error');
+  }
+}
+
+// ============ WebSocket ============
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.onopen = () => {
+    document.getElementById('sidebarStatus').classList.remove('offline');
+    document.getElementById('sidebarStatusText').textContent = '已连接';
+    refreshStatus();
+  };
+
+  ws.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      handleWSMessage(msg);
+    } catch(e) { console.error(e); }
+  };
+
+  ws.onclose = () => {
+    document.getElementById('sidebarStatus').classList.add('offline');
+    document.getElementById('sidebarStatusText').textContent = '重连中...';
+    reconnectTimer = setTimeout(connectWS, 2000);
+  };
+
+  ws.onerror = () => { ws.close(); };
+}
+
+function handleWSMessage(msg) {
+  // 侧边栏状态
+  document.getElementById('wsCount').textContent = msg.data?.connections || document.querySelectorAll('.status-card').length;
+
+  // 顶部状态更新
+  if (msg.type === 'system') {
+    if (msg.event === 'status_change') {
+      setTimeout(refreshStatus, 500);
+      setTimeout(refreshFeatures, 500);
+    }
+  }
+
+  // 日志实时推送
+  if (msg.type === 'log') {
+    addLogEntry(msg.data);
+  }
+
+  // 消息流
+  if (['danmaku', 'ai_response', 'vision'].includes(msg.type)) {
+    addMessage(msg, 'messageStream');
+    // 如果在消息页面也添加
+    if (document.getElementById('page-messages').classList.contains('active')) {
+      addMessage(msg, 'messageHistoryStream');
+    }
+  }
+
+  // 视觉结果显示
+  if (msg.type === 'vision' && msg.event === 'vision_analysis') {
+    const resultDiv = document.getElementById('visionResult');
+    resultDiv.innerHTML = `
+      <div class="vision-result">
+        <h4>${msg.data.success ? '✅ 分析完成' : '❌ 分析失败'}</h4>
+        <p><strong>目标:</strong> ${msg.data.target}</p>
+        <p><strong>分析结果:</strong></p>
+        <p>${msg.data.analysis}</p>
+      </div>
+    `;
+  }
+}
+
+// ============ Tab Filter ============
+document.querySelectorAll('#page-messages .tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('#page-messages .tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    currentFilter = tab.dataset.filter;
+    loadMessages();
+  });
+});
+
+// ============ Uptime ============
+function updateUptime() {
+  const el = document.getElementById('uptime');
+  const match = el.textContent.match(/(\d+)s/);
+  const secs = match ? parseInt(match[1]) + 1 : 0;
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  el.textContent = h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`;
+}
+
+// ============ 初始化 ============
+refreshStatus();
+connectWS();
+uptimeTimer = setInterval(updateUptime, 1000);
+setInterval(refreshStatus, 5000);
+
+// ============ 日志功能 ============
+let logAutoRefreshInterval = null;
+
+async function loadLogs() {
+  try {
+    const level = document.getElementById('logLevelFilter').value;
+    const loggerName = document.getElementById('logLoggerFilter').value;
+    const url = new URL('/api/logs', location.origin);
+    if (level) url.searchParams.set('level', level);
+    if (loggerName) url.searchParams.set('logger', loggerName);
+    url.searchParams.set('limit', '300');
+
+    const resp = await fetch(url.pathname + url.search);
+    const result = await resp.json();
+    renderLogs(result.logs);
+  } catch(e) { console.error(e); }
+}
+
+function renderLogs(logs) {
+  const buffer = document.getElementById('logBuffer');
+  if (!logs.length) {
+    buffer.innerHTML = '<div style="text-align:center; color:#666; padding:40px;">暂无日志</div>';
+    return;
+  }
+  buffer.innerHTML = '';
+  logs.forEach(log => {
+    const item = document.createElement('div');
+    item.className = 'log-entry';
+    const time = new Date(log.timestamp * 1000);
+    const timeStr = time.toLocaleTimeString('zh-CN', { hour12: false });
+    const levelColor = { 'INFO': '#4caf50', 'WARNING': '#ff9800', 'ERROR': '#f44336', 'CRITICAL': '#d32f2f', 'DEBUG': '#888' }[log.level] || '#888';
+    item.innerHTML = `<span style="color:#666;">[${timeStr}]</span> <span style="color:${levelColor};font-weight:600;">${log.level}</span> <span style="color:#888;">[${log.logger}]</span> <span style="color:#ccc;">${log.message}</span>`;
+    buffer.appendChild(item);
+  });
+  buffer.scrollTop = buffer.scrollHeight;
+}
+
+function addLogEntry(log) {
+  const buffer = document.getElementById('logBuffer');
+  if (!buffer || !document.getElementById('page-logs').classList.contains('active')) return;
+  const item = document.createElement('div');
+  item.className = 'log-entry';
+  const time = new Date(log.timestamp * 1000);
+  const timeStr = time.toLocaleTimeString('zh-CN', { hour12: false });
+  const levelColor = { 'INFO': '#4caf50', 'WARNING': '#ff9800', 'ERROR': '#f44336', 'CRITICAL': '#d32f2f', 'DEBUG': '#888' }[log.level] || '#888';
+  item.innerHTML = `<span style="color:#666;">[${timeStr}]</span> <span style="color:${levelColor};font-weight:600;">${log.level}</span> <span style="color:#888;">[${log.logger}]</span> <span style="color:#ccc;">${log.message}</span>`;
+  buffer.appendChild(item);
+  buffer.scrollTop = buffer.scrollHeight;
+  while (buffer.children.length > 500) buffer.removeChild(buffer.firstChild);
+}
+
+function toggleLogAutoRefresh() {
+  const enabled = document.getElementById('logAutoRefresh').checked;
+  if (enabled) {
+    logAutoRefreshInterval = setInterval(() => {
+      if (document.getElementById('page-logs').classList.contains('active')) {
+        loadLogs();
+      }
+    }, 3000);
+  } else {
+    clearInterval(logAutoRefreshInterval);
+    logAutoRefreshInterval = null;
+  }
+}
+
+// ============ 功能控制 ============
+async function refreshFeatures() {
+  try {
+    const resp = await fetch('/api/features');
+    const features = await resp.json();
+    renderFeatureCards(features);
+  } catch(e) { console.error(e); }
+}
+
+function renderFeatureCards(features) {
+  const grid = document.getElementById('featureGrid');
+
+  // 状态映射：status code → 显示文字
+  const statusText = {
+    'not_enabled': '未启用',
+    'connection_failed': '连接失败',
+    'connected': '已连接',
+    'running': '运行中',
+    'stopped': '已停止',
+  };
+
+  const cards = [
+    {
+      key: 'live2d', title: 'Live2D',
+      enabled: features.live2d?.enabled,
+      available: features.live2d?.available,
+      statusText: statusText[features.live2d?.status] || (features.live2d?.enabled ? '已启用' : '未启用'),
+      sub: `${features.live2d?.host}:${features.live2d?.port}`,
+      onStart: () => startFeature('live2d'),
+      onStop: () => stopFeature('live2d'),
+    },
+    {
+      key: 'tts', title: 'TTS 语音',
+      enabled: features.tts?.enabled,
+      available: features.tts?.available,
+      statusText: features.tts?.enabled ? '已启用' : '未启用',
+      sub: `端口 ${features.tts?.port}`,
+      onStart: () => startFeature('tts'),
+      onStop: () => stopFeature('tts'),
+    },
+    {
+      key: 'danmaku_listener', title: '弹幕监听',
+      enabled: features.danmaku_listener?.enabled,
+      available: features.danmaku_listener?.available,
+      statusText: features.danmaku_listener?.enabled ? '运行中' : '已停止',
+      sub: `房间 ${features.danmaku_listener?.room_id}`,
+      onStart: () => startFeature('danmaku_listener'),
+      onStop: () => stopFeature('danmaku_listener'),
+    },
+  ];
+
+  grid.innerHTML = cards.map(c => {
+    const canStart = c.available && !c.enabled;
+    const canStop = c.enabled;
+    return `
+      <div class="status-card" style="display:flex; flex-direction:column; gap:12px;">
+        <div class="status-card-header">
+          <div class="status-card-title">${c.title}</div>
+          <div class="status-indicator ${c.enabled ? 'online' : 'offline'}">${c.enabled ? '● 运行中' : '● 已停止'}</div>
+        </div>
+        <div class="status-card-value">${c.statusText}</div>
+        <div class="status-card-sub">${c.sub}</div>
+        <div style="display:flex; gap:8px; margin-top:auto;">
+          <button class="btn" style="flex:1; padding:6px 12px; font-size:12px; ${!canStart ? 'opacity:0.4; cursor:not-allowed;' : ''}" 
+                  ${canStart ? '' : 'disabled'} onclick="(${c.onStart.toString()})()">▶️ 启动</button>
+          <button class="btn btn-secondary" style="flex:1; padding:6px 12px; font-size:12px; ${!canStop ? 'opacity:0.4; cursor:not-allowed;' : ''}" 
+                  ${canStop ? '' : 'disabled'} onclick="(${c.onStop.toString()})()">⏹️ 停止</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function startFeature(name) {
+  try {
+    const resp = await fetch(`/api/features/${name}/start`, { method: 'POST' });
+    const result = await resp.json();
+    showToast(result.message || `正在启动 ${name}...`);
+    setTimeout(refreshFeatures, 500);
+  } catch(e) { showToast('启动失败', 'error'); }
+}
+
+async function stopFeature(name) {
+  try {
+    const resp = await fetch(`/api/features/${name}/stop`, { method: 'POST' });
+    const result = await resp.json();
+    showToast(result.message || `正在停止 ${name}...`);
+    setTimeout(refreshFeatures, 500);
+  } catch(e) { showToast('停止失败', 'error'); }
+}
+
+async function startAllFeatures() {
+  const features = ['live2d', 'tts', 'danmaku_listener'];
+  for (const f of features) {
+    await startFeature(f);
+  }
+}
+
+async function stopAllFeatures() {
+  const features = ['danmaku_listener', 'tts', 'live2d'];
+  for (const f of features) {
+    await stopFeature(f);
+  }
+}
+
+// ============ 更新导航处理 ============
+document.querySelectorAll('.nav-item').forEach(item => {
+  item.addEventListener('click', () => {
+    document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    item.classList.add('active');
+    document.getElementById('page-' + item.dataset.page).classList.add('active');
+    document.getElementById('pageTitle').textContent = item.textContent.trim();
+    if (item.dataset.page === 'config') loadConfig();
+    if (item.dataset.page === 'messages') loadMessages();
+    if (item.dataset.page === 'control') refreshFeatures();
+    if (item.dataset.page === 'logs') { loadLogs(); toggleLogAutoRefresh(); }
+    else { clearInterval(logAutoRefreshInterval); logAutoRefreshInterval = null; }
+  });
+});
+</script>
+
+</body>
+</html>

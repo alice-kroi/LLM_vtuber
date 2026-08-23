@@ -9,6 +9,8 @@
 
 from typing_extensions import TypedDict
 from typing import Optional, Dict, List, Union, Callable, Any
+import asyncio
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -80,41 +82,57 @@ class ToolRegistry:
         """
         return self.tools.get(name)
     
-    def execute_tool(self, tool_call: ToolCall) -> ToolResult:
+    async def execute_tool(self, tool_call: ToolCall, timeout: float = 60.0) -> ToolResult:
         """
-        执行工具调用
-        
+        执行工具调用（支持同步和异步工具函数）
+
         Args:
             tool_call: 工具调用请求
-        
+            timeout: 工具执行超时时间（秒）
+
         Returns:
             工具执行结果
         """
         try:
             tool_name = tool_call["name"]
             tool_func = self.get_tool(tool_name)
-            
+
             if not tool_func:
                 return ToolResult(
                     tool_call_id=tool_call["tool_call_id"],
                     tool_name=tool_name,
                     error=f"工具不存在: {tool_name}"
                 )
-            
-            # 执行工具
-            result = tool_func(**tool_call["arguments"])
-            
+
+            # 异步工具：await + 超时保护
+            if asyncio.iscoroutinefunction(tool_func):
+                result = await asyncio.wait_for(
+                    tool_func(**tool_call["arguments"]),
+                    timeout=timeout
+                )
+            else:
+                # 同步工具：直接调用
+                result = tool_func(**tool_call["arguments"])
+
             return ToolResult(
                 tool_call_id=tool_call["tool_call_id"],
                 tool_name=tool_name,
                 result=result
             )
-            
+
+        except asyncio.TimeoutError:
+            error_msg = f"工具执行超时 ({timeout}s): {tool_call.get('name', 'unknown')}"
+            logger.error(error_msg)
+            return ToolResult(
+                tool_call_id=tool_call.get("tool_call_id", ""),
+                tool_name=tool_call.get("name", "unknown"),
+                error=error_msg
+            )
         except Exception as e:
             error_msg = f"工具执行失败: {str(e)}"
             logger.error(error_msg)
             return ToolResult(
-                tool_call_id=tool_call["tool_call_id"],
+                tool_call_id=tool_call.get("tool_call_id", ""),
                 tool_name=tool_call.get("name", "unknown"),
                 error=error_msg
             )
@@ -124,24 +142,25 @@ class ToolRegistry:
 tool_registry = ToolRegistry()
 
 
-def tool_dispatch_node(state: Dict) -> Dict:
+async def tool_dispatch_node(state: Dict) -> Dict:
     """
-    工具调度节点
-    
+    工具调度节点（异步）
+
     接收工具调用请求，解析工具参数，执行相应工具并返回结果。
-    
+    支持同步和异步工具函数。
+
     Args:
         state: 状态对象，包含工具调用请求
-    
+
     Returns:
         更新后的状态，包含工具执行结果
     """
     try:
         logger.info("执行工具调度节点")
-        
+
         # 获取工具调用请求
         tool_calls = state.get("tool_calls", [])
-        
+
         if not tool_calls:
             logger.warning("未收到工具调用请求")
             return {
@@ -149,22 +168,22 @@ def tool_dispatch_node(state: Dict) -> Dict:
                 "tool_results": [],
                 "error": None
             }
-        
+
         # 执行所有工具调用
         tool_results = []
         for tool_call in tool_calls:
-            result = tool_registry.execute_tool(tool_call)
+            result = await tool_registry.execute_tool(tool_call)
             tool_results.append(result)
-        
+
         logger.info(f"工具执行完成，共处理 {len(tool_results)} 个工具调用")
-        
+
         # 更新状态并返回
         return {
             **state,
             "tool_results": tool_results,
             "error": None
         }
-        
+
     except Exception as e:
         error_msg = f"工具调度节点失败: {str(e)}"
         logger.error(error_msg)
@@ -340,6 +359,24 @@ tool_registry.register_tool("example_tool", example_tool)
 tool_registry.register_tool("add_numbers", add_numbers)
 tool_registry.register_tool("play_audio", play_audio_tool)
 tool_registry.register_tool("calculator", calculator_tool)
+
+# 注册浏览器工具
+try:
+    from tool.browser_tool import web_search, fetch_webpage, browser_manager
+    tool_registry.register_tool("web_search", web_search)
+    tool_registry.register_tool("fetch_webpage", fetch_webpage)
+    logger.info("浏览器工具已注册: web_search, fetch_webpage")
+except ImportError as e:
+    logger.warning(f"浏览器工具未注册（playwright 未安装）: {e}")
+
+# 注册视觉分析工具
+try:
+    from tool.vision_tool import vision_analyze, list_windows_tool
+    tool_registry.register_tool("vision_analyze", vision_analyze)
+    tool_registry.register_tool("list_windows", list_windows_tool)
+    logger.info("视觉分析工具已注册: vision_analyze, list_windows")
+except ImportError as e:
+    logger.warning(f"视觉分析工具未注册（依赖未安装）: {e}")
 
 
 if __name__ == "__main__":
