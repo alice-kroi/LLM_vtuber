@@ -593,6 +593,25 @@ class LangGraphManager:
         self.enable_tts = False
         self.enable_cloud_tts = False
         self.context_controller = get_context_controller() if context_controller_available else None
+        
+        # 意图分类器嵌入模型将在首次使用时懒加载
+        # 如需预加载，可在 build_graph 后调用 _preload_intent_model_async()
+        self._intent_preload_done = False
+
+    def _preload_intent_model_async(self):
+        """在后台线程中预加载意图分类器模型"""
+        if self._intent_preload_done:
+            return
+        self._intent_preload_done = True
+        import threading
+        def _load():
+            try:
+                from LLM_node import preload_embed_model
+                preload_embed_model()
+                logger.info("[意图分类] 嵌入模型预加载完成（后台线程）")
+            except Exception as e:
+                logger.warning(f"意图分类器预加载失败: {e}")
+        threading.Thread(target=_load, daemon=True).start()
 
     def build_graph(self, enable_tts=False, enable_live2d=False, enable_cloud_tts=False):
         """
@@ -616,6 +635,9 @@ class LangGraphManager:
             f"Live2D: {'启用' if self.enable_live2d else '禁用'}, "
             f"上下文控制: {'启用' if enable_context_control else '禁用'})"
         )
+        
+        # 后台预加载意图分类器嵌入模型
+        self._preload_intent_model_async()
 
         # 创建状态图，使用LLMState作为状态类型
         self.graph = StateGraph(LLMState)
