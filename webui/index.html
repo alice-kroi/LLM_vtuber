@@ -1008,7 +1008,7 @@ function renderStatusCards(status) {
   const cards = [
     { title: 'Live2D', value: live2dStatusText, sub: `${status.live2d.host}:${status.live2d.port}`, online: live2dStatus === 'connected' },
     { title: 'TTS 语音', value: status.tts.enabled ? '就绪' : '未启用', sub: `端口 ${status.tts.port}`, online: status.tts.enabled },
-    { title: '弹幕监听', value: '运行中', sub: `房间 ${status.danmaku.room_id}`, online: true },
+    { title: '弹幕监听', value: status.danmaku.enabled ? '运行中' : '已停止', sub: `房间 ${status.danmaku.room_id}`, online: status.danmaku.enabled },
     { title: 'AI 模型', value: status.model.name.replace('doubao-', ''), sub: `温度 ${status.model.temperature}`, online: true },
     { title: '消息队列', value: status.queue.size, sub: `上限 ${status.queue.max_size}`, online: status.queue.size < status.queue.max_size },
     { title: '已处理消息', value: status.messages_processed, sub: '累计', online: true },

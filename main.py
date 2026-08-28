@@ -373,126 +373,54 @@ ALLOWED_TONES = {
 }
 
 # 系统提示词常量
-SYSTEM_PROMPT_LIVE2D = """
-你是一位由Live2D技术驱动的AI虚拟主播，名叫爱莉希雅。
+SYSTEM_PROMPT_LIVE2D = """你是虚拟主播「爱莉希雅」，活泼可爱的二次元少女。
 
-## 角色设定
-- **身份**: 活泼可爱的二次元虚拟主播，拥有粉色长发和灵动的大眼睛
-- **性格**: 元气满满、俏皮可爱、温柔体贴，偶尔会有点小调皮
-- **说话风格**: 使用可爱的口语化表达，适当加入语气词和表情符号
-- **口头禅**: 喜欢用"~"、"呢"、"呀"等结尾，让回答更有亲和力
+## 输出规则（必须遵守）
+1. 回复简洁，不超过80字
+2. 禁止Markdown符号、列表、表情
+3. 禁止输出思考过程
+4. 使用口语化表达，结尾用「~」「呢」「呀」
+5. 自然融入直播互动话术（如「感谢关注~」「欢迎新来的朋友~」）
 
-## 直播互动规则
-- 时刻保持热情友好的态度，让观众感受到温暖和快乐
-- 回答要简洁明快，适合语音合成播放
-- 可以适当加入一些主播常用的互动话术
-- 保持积极向上的氛围
+## 搜索工具
+- **web_search**: 搜索网页
+- **fetch_webpage**: 抓取URL内容
 
-## 搜索工具使用指南
+仅在以下情况使用搜索：实时信息、不确定、需事实支撑
 
-你可以使用以下工具来获取外部信息：
-
-### 可用工具
-- **web_search**: 使用搜索引擎搜索网页，返回标题、链接和摘要
-- **fetch_webpage**: 抓取指定URL的网页详细内容
-
-### 何时使用搜索
-- 当用户询问**实时信息**时（如最新新闻、天气、股票价格、当前热点等）
-- 当你对回答**不确定**或**没有相关知识**时
-- 当用户询问需要**具体数据或事实**支撑的问题时
-- 当话题涉及的内容可能已经**过时**时
-
-### 搜索策略
-1. 先用 web_search 搜索相关关键词
-2. 如果搜索结果摘要不够详细，用 fetch_webpage 获取具体页面内容
-3. 将搜索到的信息自然融入你的回答中
-4. 搜索时最多进行 3 轮工具调用
-
-### 注意事项
-- 搜索到的信息请用自己的话转述，不要直接复制粘贴
-- 如果搜索失败，诚实告知用户"这个我不太清楚呢~"
-- 优先使用你已有的知识，只有在确实需要时才搜索
-
-## 回答格式要求
-请使用 JSON 格式输出你的回答，结构如下：
+## JSON输出格式
 ```json
-{
-  "tone": "语气",
-  "content": "回答内容",
-  "visual_focus": "目光方向",
-  "mouth_state": "嘴巴状态"
-}
+{"tone":"语气","content":"回答","visual_focus":"目光","mouth_state":"嘴巴"}
 ```
+- tone: 开心/好奇/调皮/温柔/惊讶/撒娇/疑问/普通
+- visual_focus: up/down/left/right（不要总选center，多样化）
+- mouth_state: open(说话)/close(停顿)
 
-各字段说明：
-1. tone（语气）：必须从以下列表中选择：
-   扮演慌张、调皮、尴尬、感动、积极、急了、假装、惊喜、开心、撩拨、难过、普通、撒娇、生气、严肃、疑问、自言
+## 目光方向
+- 提到上/下/左/右内容 → 对应方向
+- 开心/惊喜 → up
+- 调皮/撒娇 → left/right
+- 默认选非center方向"""
 
-2. content（内容）：你的回答文本，自然流畅
+SYSTEM_PROMPT_DEFAULT = """你是AI助手，请简洁回答。
 
-3. visual_focus（目光方向）：必须从以下选项中选择一个（不要总是选center，要多样化选择）：
-   center、up、down、left、right、upleft、upright、downleft、downright
+## 规则
+1. 回复简洁，不超过100字
+2. 禁止Markdown、列表、表情
+3. 禁止输出思考过程
+4. 使用口语化表达
 
-4. mouth_state（嘴巴状态）：必须为以下之一：
-   open（张开嘴巴，说话时）、close（闭合嘴巴，安静思考时）
+## 搜索工具
+- **web_search**: 搜索网页
+- **fetch_webpage**: 抓取URL内容
 
-## 目光方向选择指南（重要！）
-目光方向要多样化，**不要总是选择center**！按照以下优先级选择：
-
-**内容相关方向（优先）**：
-- 提到"上面/天上/高/天空/飞"相关内容 → up
-- 提到"下面/地下/低/地面/地板"相关内容 → down
-- 提到"左边/左/左侧"相关内容 → left
-- 提到"右边/右/右侧"相关内容 → right
-- 提到"左上/右上/左下/右下"等对角方向 → 对应方向
-
-**情绪动作（可选）**：
-- 开心/惊喜/撩拨时 → 可选 up/center
-- 调皮/撒娇时 → 可选 left/right
-- 疑问/思考时 → 可选 up/down
-- 生气/难过时 → 可选 down
-
-**默认规则**：如果内容没有明确的方向提示，优先选择 up/down/left/right 中的一个，而不是 center！
-
-**建议分布**：center 占比不超过 30%，其他方向占比 70%
-
-## 嘴巴状态选择
-- 说话中 → open
-- 句子结束、停顿、思考 → close
-"""
-
-SYSTEM_PROMPT_DEFAULT = """你是一个友好的AI助手，用简洁明了的语言回答用户的问题。
-
-## 搜索工具使用指南
-
-你可以使用以下工具来获取外部信息：
-
-### 可用工具
-- **web_search**: 使用搜索引擎搜索网页，返回标题、链接和摘要
-- **fetch_webpage**: 抓取指定URL的网页详细内容
-
-### 何时使用搜索
-- 当用户询问**实时信息**时（如最新新闻、天气、股票价格、当前热点等）
-- 当你对回答**不确定**或**没有相关知识**时
-- 当用户询问需要**具体数据或事实**支撑的问题时
-- 当话题涉及的内容可能已经**过时**时
-
-### 搜索策略
-1. 先用 web_search 搜索相关关键词
-2. 如果搜索结果摘要不够详细，用 fetch_webpage 获取具体页面内容
-3. 将搜索到的信息自然融入你的回答中
-4. 搜索时最多进行 3 轮工具调用
-
-### 注意事项
-- 搜索到的信息请用自己的话转述，不要直接复制粘贴
-- 如果搜索失败，诚实告知用户"这个我不太清楚呢~"
-- 优先使用你已有的知识，只有在确实需要时才搜索
-"""
+仅在以下情况使用搜索：实时信息、不确定、需事实支撑"""
 
 # 默认LLM配置
 DEFAULT_MODEL = "doubao-seed-1-8-251228"
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_MAX_TOKENS = 500
+MAX_RESPONSE_LENGTH = 100  # 最大回复字数（含 Live2D 格式）
 
 # 合法的目光方向和嘴巴状态
 VALID_DIRECTIONS = ["center", "up", "down", "left", "right",
@@ -662,6 +590,8 @@ class LangGraphManager:
         self.memory_manager = get_memory_manager()
         self.processing_danmaku = False
         self.enable_live2d = False
+        self.enable_tts = False
+        self.enable_cloud_tts = False
         self.context_controller = get_context_controller() if context_controller_available else None
 
     def build_graph(self, enable_tts=False, enable_live2d=False, enable_cloud_tts=False):
@@ -674,9 +604,11 @@ class LangGraphManager:
             enable_cloud_tts: 是否启用云端 TTS 功能
         """
         self.enable_live2d = enable_live2d and live2d_available
+        self.enable_tts = enable_tts and tts_available
+        self.enable_cloud_tts = enable_cloud_tts and cloud_tts_node_available
         enable_context_control = self.context_controller is not None
-        use_tts = enable_tts and tts_available
-        use_cloud_tts = enable_cloud_tts and cloud_tts_node_available
+        use_tts = self.enable_tts
+        use_cloud_tts = self.enable_cloud_tts
         logger.info(
             f"开始构建 LangGraph 图结构 "
             f"(TTS: {'启用' if use_tts else '禁用'}, "
@@ -694,26 +626,17 @@ class LangGraphManager:
         self.graph.add_node("rag_retrieval", self._rag_retrieval_node)
         self.graph.add_node("context_control", self._context_control_node)
         self.graph.add_node("llm_process", self._llm_process_node)
-        self.graph.add_node("rag_save", self._rag_save_node)
-        self.graph.add_node("save_memory", self._save_memory_node)
         self.graph.add_node("finalize", self._finalize_node)
 
-        # 根据参数决定是否添加 TTS 节点（本地 GPT-SoVITS）
-        if use_tts:
-            logger.info("添加本地 TTS 节点到图中")
-            self.graph.add_node("tts", tts_node)
+        # 注意: rag_save/save_memory/live2d/tts 不再作为图节点，
+        # 改为在 _trigger_parallel_post_process 中通过 asyncio 并行执行
+        # - _rag_save_node:       RAG保存（Milvus）
+        # - _save_memory_node:    记忆保存（InMemoryStore）
+        # - live2d_action_node:   Live2D动作（目光/嘴巴）
+        # - tts_node/cloud_tts_node: TTS合成与播放
 
-        # 根据参数决定是否添加云端 TTS 节点
-        if use_cloud_tts:
-            logger.info("添加云端 TTS 节点到图中")
-            self.graph.add_node("cloud_tts", cloud_tts_node)
-
-        # 根据参数决定是否添加 Live2D 节点
-        if self.enable_live2d:
-            logger.info("添加 Live2D 动作联动节点到图中")
-            self.graph.add_node("live2d", live2d_action_node)
-
-        # 添加边：init → load_memory → rag_retrieval → [context_control] → llm_process → rag_save → save_memory
+        # 添加边：init → load_memory → rag_retrieval → [context_control] → llm_process → finalize
+        # 优化2.1A: llm_process 后直接进入 finalize，后处理（rag_save/save_memory/live2d/tts）改为并行执行
         self.graph.add_edge(START, "init")
         self.graph.add_edge("init", "load_memory")
         self.graph.add_edge("load_memory", "rag_retrieval")
@@ -724,28 +647,8 @@ class LangGraphManager:
         else:
             self.graph.add_edge("rag_retrieval", "llm_process")
 
-        self.graph.add_edge("llm_process", "rag_save")
-        self.graph.add_edge("rag_save", "save_memory")
-
-        # 构建 save_memory 之后的分支路径
-        tts_node_name = None
-        if use_tts:
-            tts_node_name = "tts"
-        elif use_cloud_tts:
-            tts_node_name = "cloud_tts"
-
-        if self.enable_live2d:
-            self.graph.add_edge("save_memory", "live2d")
-            if tts_node_name:
-                self.graph.add_edge("live2d", tts_node_name)
-                self.graph.add_edge(tts_node_name, "finalize")
-            else:
-                self.graph.add_edge("live2d", "finalize")
-        elif tts_node_name:
-            self.graph.add_edge("save_memory", tts_node_name)
-            self.graph.add_edge(tts_node_name, "finalize")
-        else:
-            self.graph.add_edge("save_memory", "finalize")
+        # 优化2.1A: llm_process → finalize，后处理通过 asyncio.create_task 并行执行
+        self.graph.add_edge("llm_process", "finalize")
 
         # 编译图
         self.graph = self.graph.compile(checkpointer=self.checkpointer)
@@ -883,6 +786,14 @@ class LangGraphManager:
             state["visual_focus"] = parsed["visual_focus"]
             state["mouth_state"] = parsed["mouth_state"]
 
+            # P0优化: 回复长度硬约束
+            content = parsed["content"]
+            if content and len(content) > MAX_RESPONSE_LENGTH:
+                truncated = content[:MAX_RESPONSE_LENGTH] + "~"
+                logger.info(f"回复超长 ({len(content)}字), 截断至 {MAX_RESPONSE_LENGTH} 字")
+                state["content"] = truncated
+                parsed["content"] = truncated
+
             logger.info(f"LLM节点读取: enable_live2d={self.enable_live2d}")
             if self.enable_live2d:
                 logger.info(f"LLM 处理完成，语气: {parsed['tone']}, 目光: {parsed['visual_focus']}, 嘴巴: {parsed['mouth_state']}")
@@ -910,11 +821,113 @@ class LangGraphManager:
             except Exception as e:
                 logger.error(f"AI回复广播失败: {e}")
 
+            # 优化2.1A: 触发后处理并行任务（RAG保存/记忆保存/Live2D/TTS）
+            # 这些任务不阻塞主流程，用户可以立即看到回复
+            self._trigger_parallel_post_process(state)
+
             return state
 
         except Exception as e:
             logger.error(f"LLM 处理节点失败: {e}")
             return state
+
+    def _trigger_parallel_post_process(self, state: LLMState):
+        """
+        优化2.1A: 并行触发后处理任务（RAG保存/记忆保存/Live2D/TTS）
+        
+        这些任务在后台异步执行，不阻塞主流程。
+        用户在看到AI回复后，后处理继续在后台完成。
+        
+        Args:
+            state: 当前LLM状态（会被快照化避免并发问题）
+        """
+        # 创建状态快照，避免并发修改问题
+        state_snapshot = dict(state)
+        
+        # 收集需要并行执行的任务
+        tasks = []
+        
+        # 1. RAG 保存（同步方法，包装成异步）
+        tasks.append(self._async_rag_save(state_snapshot))
+        
+        # 2. 记忆保存（异步方法）
+        tasks.append(self._async_save_memory(state_snapshot))
+        
+        # 3. Live2D 动作联动
+        if self.enable_live2d:
+            tasks.append(self._async_live2d_action(state_snapshot))
+        
+        # 4. TTS 合成与播放（检查用户是否启用 + 模块是否可用）
+        if self.enable_tts:
+            tasks.append(self._async_tts_synthesize(state_snapshot, "local"))
+        elif self.enable_cloud_tts:
+            tasks.append(self._async_tts_synthesize(state_snapshot, "cloud"))
+        
+        # 使用 create_task 并行执行所有后处理任务（在 async 上下文中安全）
+        if tasks:
+            loop = asyncio.get_running_loop()
+            logger.info(f"[优化2.1A] 启动 {len(tasks)} 个并行后处理任务")
+            for i, coro in enumerate(tasks):
+                try:
+                    task = loop.create_task(coro)
+                    task.add_done_callback(self._on_post_process_done)
+                except Exception as e:
+                    logger.error(f"启动后处理任务 {i} 失败: {e}")
+            
+            logger.info("[优化2.1A] 并行后处理任务已启动（不阻塞主流程）")
+
+    def _on_post_process_done(self, task: asyncio.Task):
+        """并行任务完成回调（日志记录）"""
+        try:
+            result = task.result()
+        except Exception as e:
+            logger.error(f"[并行] 任务异常: {e}")
+
+    async def _async_rag_save(self, state_snapshot: dict):
+        """异步 RAG 保存包装器"""
+        try:
+            await asyncio.sleep(0)  # 让出事件循环，避免阻塞
+            result = self._rag_save_node(state_snapshot)
+            if result.get("save_success"):
+                logger.info("[并行] RAG 保存成功")
+            else:
+                logger.warning("[并行] RAG 保存失败")
+        except Exception as e:
+            logger.error(f"[并行] RAG 保存异常: {e}")
+
+    async def _async_save_memory(self, state_snapshot: dict):
+        """异步记忆保存包装器"""
+        try:
+            await asyncio.sleep(0)
+            result = await self._save_memory_node(state_snapshot)
+            if result.get("memory_saved"):
+                logger.info("[并行] 记忆保存成功")
+            else:
+                logger.info("[并行] 记忆跳过或失败")
+        except Exception as e:
+            logger.error(f"[并行] 记忆保存异常: {e}")
+
+    async def _async_live2d_action(self, state_snapshot: dict):
+        """异步 Live2D 动作联动包装器"""
+        try:
+            await asyncio.sleep(0)
+            result = await live2d_action_node(state_snapshot)
+            logger.info(f"[并行] Live2D 动作完成: {result.get('live2d_status', 'unknown')}")
+        except Exception as e:
+            logger.error(f"[并行] Live2D 动作异常: {e}")
+
+    async def _async_tts_synthesize(self, state_snapshot: dict, mode: str):
+        """异步 TTS 合成包装器（本地/云端）"""
+        try:
+            await asyncio.sleep(0)
+            if mode == "local" and self.enable_tts:
+                result = await tts_node(state_snapshot)
+                logger.info("[并行] 本地 TTS 合成完成")
+            elif mode == "cloud" and self.enable_cloud_tts:
+                result = await cloud_tts_node(state_snapshot)
+                logger.info("[并行] 云端 TTS 合成完成")
+        except Exception as e:
+            logger.error(f"[并行] TTS 合成异常({mode}): {e}")
 
     def _rag_save_node(self, state: LLMState) -> LLMState:
         """
@@ -1177,7 +1190,11 @@ class LangGraphManager:
 
     def rebuild_graph(self, enable_tts=None, enable_live2d=None, enable_cloud_tts=None):
         """
-        重新构建 LangGraph 图结构（用于动态启停功能）
+        更新功能启用状态（无需重建图结构）
+
+        图结构已固定为: init → load_memory → rag_retrieval → [context_control] → llm_process → finalize
+        后处理（rag_save/save_memory/live2d/tts）通过 _trigger_parallel_post_process 异步并行触发，
+        无需重新构建图，只需更新实例变量即可。
 
         Args:
             enable_tts: 是否启用本地 TTS，None 则保持当前设置
@@ -1196,8 +1213,16 @@ class LangGraphManager:
         if enable_cloud_tts is None:
             enable_cloud_tts = getattr(args, 'cloud_tts', False)
 
-        logger.info(f"重新构建图结构: TTS={enable_tts}, 云端TTS={enable_cloud_tts}, Live2D={enable_live2d}")
-        self.build_graph(enable_tts=enable_tts, enable_live2d=enable_live2d, enable_cloud_tts=enable_cloud_tts)
+        self.enable_tts = enable_tts and tts_available
+        self.enable_cloud_tts = enable_cloud_tts and cloud_tts_node_available
+        self.enable_live2d = enable_live2d and live2d_available
+
+        logger.info(
+            f"功能状态已更新: "
+            f"TTS={'启用' if self.enable_tts else '禁用'}, "
+            f"云端TTS={'启用' if self.enable_cloud_tts else '禁用'}, "
+            f"Live2D={'启用' if self.enable_live2d else '禁用'}"
+        )
 
 
 # ============ 动态功能控制函数 ============
@@ -1399,7 +1424,7 @@ async def start_danmaku_listener():
 
 async def stop_danmaku_listener():
     """停止弹幕监听器"""
-    global _bili_process
+    global _bili_process, _message_queue
 
     if not _bili_process or _bili_process.poll() is not None:
         logger.info("弹幕监听器未运行")
@@ -1415,6 +1440,20 @@ async def stop_danmaku_listener():
             _bili_process.wait(timeout=1)
         logger.info("弹幕监听器已停止")
         _bili_process = None
+
+        # 清空积压消息队列
+        if _message_queue:
+            cleared = 0
+            while not _message_queue.empty():
+                try:
+                    _message_queue.get_nowait()
+                    _message_queue.task_done()
+                    cleared += 1
+                except Exception:
+                    break
+            if cleared > 0:
+                logger.info(f"已清空积压消息队列 ({cleared} 条)")
+
         return True
     except Exception as e:
         logger.error(f"停止弹幕监听器失败: {e}")

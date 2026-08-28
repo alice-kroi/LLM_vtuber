@@ -188,7 +188,15 @@ async def get_status(request: web.Request) -> web.Response:
             "temperature": _config.getfloat("model", "temperature") if _config else 0.7,
         }
 
+        danmaku_enabled = False
+        try:
+            bili_proc = getattr(app_main, '_bili_process', None)
+            danmaku_enabled = bool(bili_proc and bili_proc.poll() is None)
+        except Exception:
+            pass
+
         danmaku_info = {
+            "enabled": danmaku_enabled,
             "room_id": app_main.args.room_id if app_main.args and app_main.args.room_id else
                        (_config.get("bilibili", "room_id") if _config else "904823"),
         }
