@@ -29,10 +29,10 @@ def create_llm_database():
     Returns:
         bool: 数据库创建是否成功
     """
-    # 初始化参数
-    uri = "http://localhost:19530"
-    token = "root:Milvus"
-    db_name = "LLM"
+    # 初始化参数（从环境变量读取）
+    uri = os.getenv("MILVUS_URI", "http://localhost:19530")
+    token = os.getenv("MILVUS_TOKEN", "")
+    db_name = os.getenv("MILVUS_DB", "LLM")
 
     try:
         print("=== 开始创建LLM数据库 ===")

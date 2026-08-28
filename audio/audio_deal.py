@@ -587,13 +587,15 @@ def get_audio_output_devices() -> Dict[str, Any]:
     return result
 
 
-def play_audio_stream(audio_data: bytes, output_device: Optional[int] = None) -> Dict[str, Any]:
+def play_audio_stream(audio_data: bytes, output_device: Optional[int] = None, 
+                      sample_rate: Optional[int] = None) -> Dict[str, Any]:
     """
     函数7：直接播放音频流数据（不保存到文件）
     
     Args:
         audio_data: 音频数据（支持 WAV 格式或原始 PCM 数据）
         output_device: 输出设备编号，None表示使用默认设备
+        sample_rate: 采样率，用于纯 PCM 数据。如果是 WAV 格式会自动解析
     
     Returns:
         Dict[str, Any]: 包含播放结果的字典
@@ -606,7 +608,7 @@ def play_audio_stream(audio_data: bytes, output_device: Optional[int] = None) ->
         "success": False,
         "error": None,
         "duration": 0.0,
-        "sample_rate": 32000
+        "sample_rate": sample_rate or 32000
     }
     
     if sd is None or np is None:
@@ -648,9 +650,10 @@ def play_audio_stream(audio_data: bytes, output_device: Optional[int] = None) ->
                 print(f"警告: 不支持的位深度 {bits_per_sample}，使用16位")
                 samples = np.frombuffer(raw_data, dtype=np.int16)
         else:
-            print("警告: 不是标准WAV格式，假设为16位PCM数据")
+            if sample_rate is None:
+                sample_rate = 32000
+            print(f"解析PCM数据: 采样率={sample_rate} Hz (16位)")
             samples = np.frombuffer(audio_data, dtype=np.int16)
-            sample_rate = 32000
         
         print(f"采样数: {len(samples)}, 预期时长: {len(samples) / sample_rate:.2f} 秒")
         

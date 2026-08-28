@@ -196,7 +196,9 @@ def _call_chat_api_with_retry(state: ChatState, api_key: str, base_url: str,
             if hasattr(msg, "content") and msg.content:
                 ai_resp = msg.content
             elif hasattr(msg, "reasoning_content") and msg.reasoning_content:
-                ai_resp = msg.reasoning_content
+                # 记录思考过程但不作为响应返回
+                logger.debug(f"[LLM] reasoning_content 长度: {len(msg.reasoning_content)}, 不作为正式回复")
+                ai_resp = ""
 
             # 解析 tool_calls
             tool_calls = None

@@ -14,6 +14,7 @@ import os
 import sys
 import time
 import json
+import configparser
 from datetime import datetime
 from typing import TypedDict, Optional, Dict, List, Any
 
@@ -26,6 +27,22 @@ from Millvus_base import (
     init_milvus_client,
     DoubaoEmbeddings
 )
+
+
+def _load_rag_config():
+    """从 config.ini 加载配置"""
+    config = configparser.ConfigParser()
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.ini')
+    if os.path.exists(config_path):
+        config.read(config_path, encoding='utf-8')
+    return config
+
+
+_rag_config = _load_rag_config()
+
+# Milvus 配置 - 优先从环境变量读取，否则从配置文件读取
+MILVUS_URI = os.getenv("MILVUS_URI", _rag_config.get("milvus", "uri", fallback="http://localhost:19530"))
+MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", _rag_config.get("milvus", "token", fallback=""))
 
 
 class RetrievalState(TypedDict):
@@ -89,8 +106,8 @@ def retrieve_documents_node(state: RetrievalState) -> RetrievalState:
         
         # 初始化Milvus客户端
         client = init_milvus_client(
-            uri="http://localhost:19530",
-            token="root:Milvus",
+            uri=MILVUS_URI,
+            token=MILVUS_TOKEN,
             db_name=state["db_name"]
         )
         

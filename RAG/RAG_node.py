@@ -13,6 +13,8 @@ from typing import Optional, Dict, List, Union
 import logging
 import time
 import uuid
+import os
+import configparser
 
 from Millvus_base import (
     init_milvus_client,
@@ -22,6 +24,22 @@ from Millvus_base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _load_rag_config():
+    """从 config.ini 加载配置"""
+    config = configparser.ConfigParser()
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.ini')
+    if os.path.exists(config_path):
+        config.read(config_path, encoding='utf-8')
+    return config
+
+
+_rag_config = _load_rag_config()
+
+# Milvus 配置 - 优先从环境变量读取，否则从配置文件读取
+MILVUS_URI = os.getenv("MILVUS_URI", _rag_config.get("milvus", "uri", fallback="http://localhost:19530"))
+MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", _rag_config.get("milvus", "token", fallback=""))
 
 # --------- 单例与常量 ---------
 # Embedding模型单例（避免每次调用重新初始化）
@@ -49,7 +67,7 @@ MAX_DISTANCE_THRESHOLD = 0.65
 
 # Milvus 配置常量
 DEFAULT_COLLECTION = "chat_history"
-DEFAULT_DB = "LLM_vtuber"
+DEFAULT_DB = os.getenv("MILVUS_DB", _rag_config.get("milvus", "database", fallback="LLM_vtuber"))
 DEFAULT_TOP_K = 3
 DEFAULT_METRIC = "COSINE"
 DEFAULT_NPROBE = 10
@@ -222,8 +240,8 @@ def rag_retrieval_node(state: RAGState, retrieval_params: Optional[RetrievalPara
 
         # 3. 获取 Milvus 客户端并确保集合已加载（Milvus重启后必须手动加载）
         client = init_milvus_client(
-            uri="http://localhost:19530",
-            token="root:Milvus",
+            uri=MILVUS_URI,
+            token=MILVUS_TOKEN,
             db_name=params["db_name"]
         )
 
@@ -368,8 +386,8 @@ def rag_save_node(state: RAGState) -> RAGState:
         db_name = state.get("db_name", DEFAULT_DB)
 
         client = init_milvus_client(
-            uri="http://localhost:19530",
-            token="root:Milvus",
+            uri=MILVUS_URI,
+            token=MILVUS_TOKEN,
             db_name=db_name
         )
         _ensure_collection_loaded(client, collection_name)

@@ -38,14 +38,49 @@ from langgraph.checkpoint.memory import MemorySaver
 from LLM_node import llm_chat_node, context_aware_qa_node, LLMState
 from RAG_node import rag_retrieval_node, rag_save_node, RAGState
 from memory_manager import get_memory_manager, MemoryManager
+from danmu_config import DanmuTtsConfig, VisionDanmuConfig
 
-# 条件导入 TTS 模块
+# 条件导入上下文控制模块
+try:
+    from context_controller import get_context_controller
+    context_controller_available = True
+except ImportError:
+    context_controller_available = False
+    get_context_controller = None
+    logger.warning("上下文控制模块未安装")
+
+# 条件导入结构化输出解析模块
+try:
+    from live2d_models import parse_structured_response, LIVE2D_RESPONSE_SCHEMA
+    structured_output_available = True
+except ImportError:
+    structured_output_available = False
+    parse_structured_response = None
+    LIVE2D_RESPONSE_SCHEMA = None
+
+# 条件导入 TTS 模块 (GPT-SoVITS)
 try:
     from audio.audio_main import tts_node
     tts_available = True
 except ImportError:
     tts_available = False
     tts_node = None
+
+# 条件导入云端 TTS 模块
+try:
+    from audio.audio_main import (
+        cloud_tts_node,
+        cloud_tts_available,
+        set_cloud_tts_config,
+        get_cloud_tts_config,
+    )
+    cloud_tts_node_available = True
+except ImportError:
+    cloud_tts_node_available = False
+    cloud_tts_available = False
+    cloud_tts_node = None
+    set_cloud_tts_config = None
+    get_cloud_tts_config = None
 
 # 条件导入 Live2D 模块
 try:
@@ -64,6 +99,22 @@ except ImportError as e:
     Direction = None
     logger.warning(f"Live2D模块导入失败: {e}")
 
+# 条件导入 AI 读弹幕 TTS 模块
+try:
+    from danmu_tts import DanmuTtsService
+    danmu_tts_available = True
+except ImportError:
+    danmu_tts_available = False
+    DanmuTtsService = None
+
+# 条件导入视觉弹幕模块
+try:
+    from vision_danmu import VisionDanmuService
+    vision_danmu_available = True
+except ImportError:
+    vision_danmu_available = False
+    VisionDanmuService = None
+
 # 全局变量
 args = None
 http_server = None
@@ -71,6 +122,15 @@ langgraph_manager = None
 live2d_manager = None
 live2d_action_generator = None
 _bili_process = None  # 弹幕监听子进程引用，用于退出时清理
+danmu_tts_config = DanmuTtsConfig()
+vision_danmu_config = VisionDanmuConfig()
+cloud_tts_config = None  # 云端 TTS 配置，延迟加载
+
+# AI 读弹幕 TTS 服务实例
+danmu_tts_service = None
+# 视觉弹幕服务实例
+vision_danmu_service = None
+_vision_danmu_task = None
 
 # 消息处理队列：串行处理弹幕，避免 Live2D/TTS 并发冲突导致死锁
 # （move_to_direction 持锁 1.5s，TTS 播放需独占音频，并发会导致排队卡死）
@@ -100,7 +160,10 @@ def parse_args():
     parser.add_argument("--live2d-eye-tracking", action="store_true", default=True, help="启用目光追踪")
     parser.add_argument("--live2d-expression", action="store_true", default=True, help="启用表情动作")
     parser.add_argument("--tts", action="store_true", help="开启 tts 功能")
+    parser.add_argument("--cloud-tts", action="store_true", help="开启云端 TTS 功能")
     parser.add_argument("--room-id", type=int, help="指定哔哩哔哩直播间号")
+    parser.add_argument("--danmu-tts", action="store_true", help="启用 AI 读弹幕 TTS")
+    parser.add_argument("--vision-danmu", action="store_true", help="启用视觉弹幕")
     return parser.parse_args()
 
 # 异步HTTP服务器处理函数
@@ -168,16 +231,29 @@ async def handle_post_request(request):
             logger.info(f"消息已入队列（当前队列长度: {_message_queue.qsize()}）")
 
             try:
-                from webui.app import ws_manager
+                from webui.app import ws_manager, add_message_to_history
                 for msg in (messages if isinstance(messages, list) else [messages]):
                     if msg.get("role") == "user":
                         name = msg.get("name", "匿名")
                         content = msg.get("content", "")
                         await ws_manager.broadcast_danmaku(name, content)
-                        from webui.app import add_message_to_history
                         add_message_to_history("danmaku", {"username": name, "content": content})
-            except Exception:
-                pass
+                        logger.info(f"WebSocket 已广播弹幕: {name}: {content[:50]}")
+            except ImportError as e:
+                logger.warning(f"WebSocket 广播模块导入失败: {e}")
+            except Exception as e:
+                logger.error(f"WebSocket 广播弹幕失败: {e}")
+
+            # AI 读弹幕 TTS：弹幕到达时异步触发朗读
+            if danmu_tts_service and danmu_tts_config.enabled:
+                try:
+                    for msg in (messages if isinstance(messages, list) else [messages]):
+                        if msg.get("role") == "user" and msg.get("source") != "vision":
+                            asyncio.create_task(asyncio.to_thread(
+                                danmu_tts_service.on_danmaku, msg.get("content", "")
+                            ))
+                except Exception as e:
+                    logger.error(f"AI读弹幕TTS触发失败: {e}")
 
         return JSONResponse({"status": "queued"})
 
@@ -244,7 +320,10 @@ async def live2d_action_node(state: LLMState) -> LLMState:
 
     try:
         response = state.get("response", "")
-        parsed = parse_response_format(response, enable_live2d=True)
+        if structured_output_available:
+            parsed = parse_structured_response(response, enable_live2d=True)
+        else:
+            parsed = parse_response_format(response, enable_live2d=True)
         visual_focus = parsed["visual_focus"]
         mouth_state = parsed["mouth_state"]
 
@@ -309,18 +388,52 @@ SYSTEM_PROMPT_LIVE2D = """
 - 可以适当加入一些主播常用的互动话术
 - 保持积极向上的氛围
 
-## 回答格式要求
-请在回答时使用以下格式输出：
-【语气】回答内容|目光方向|嘴巴状态
+## 搜索工具使用指南
 
-其中：
-1. 语气必须从以下列表中选择：
+你可以使用以下工具来获取外部信息：
+
+### 可用工具
+- **web_search**: 使用搜索引擎搜索网页，返回标题、链接和摘要
+- **fetch_webpage**: 抓取指定URL的网页详细内容
+
+### 何时使用搜索
+- 当用户询问**实时信息**时（如最新新闻、天气、股票价格、当前热点等）
+- 当你对回答**不确定**或**没有相关知识**时
+- 当用户询问需要**具体数据或事实**支撑的问题时
+- 当话题涉及的内容可能已经**过时**时
+
+### 搜索策略
+1. 先用 web_search 搜索相关关键词
+2. 如果搜索结果摘要不够详细，用 fetch_webpage 获取具体页面内容
+3. 将搜索到的信息自然融入你的回答中
+4. 搜索时最多进行 3 轮工具调用
+
+### 注意事项
+- 搜索到的信息请用自己的话转述，不要直接复制粘贴
+- 如果搜索失败，诚实告知用户"这个我不太清楚呢~"
+- 优先使用你已有的知识，只有在确实需要时才搜索
+
+## 回答格式要求
+请使用 JSON 格式输出你的回答，结构如下：
+```json
+{
+  "tone": "语气",
+  "content": "回答内容",
+  "visual_focus": "目光方向",
+  "mouth_state": "嘴巴状态"
+}
+```
+
+各字段说明：
+1. tone（语气）：必须从以下列表中选择：
    扮演慌张、调皮、尴尬、感动、积极、急了、假装、惊喜、开心、撩拨、难过、普通、撒娇、生气、严肃、疑问、自言
 
-2. 目光方向必须从以下选项中选择一个（不要总是选center，要多样化选择）：
+2. content（内容）：你的回答文本，自然流畅
+
+3. visual_focus（目光方向）：必须从以下选项中选择一个（不要总是选center，要多样化选择）：
    center、up、down、left、right、upleft、upright、downleft、downright
 
-3. 嘴巴状态必须为以下之一：
+4. mouth_state（嘴巴状态）：必须为以下之一：
    open（张开嘴巴，说话时）、close（闭合嘴巴，安静思考时）
 
 ## 目光方向选择指南（重要！）
@@ -348,7 +461,33 @@ SYSTEM_PROMPT_LIVE2D = """
 - 句子结束、停顿、思考 → close
 """
 
-SYSTEM_PROMPT_DEFAULT = "你是一个友好的AI助手，用简洁明了的语言回答用户的问题。"
+SYSTEM_PROMPT_DEFAULT = """你是一个友好的AI助手，用简洁明了的语言回答用户的问题。
+
+## 搜索工具使用指南
+
+你可以使用以下工具来获取外部信息：
+
+### 可用工具
+- **web_search**: 使用搜索引擎搜索网页，返回标题、链接和摘要
+- **fetch_webpage**: 抓取指定URL的网页详细内容
+
+### 何时使用搜索
+- 当用户询问**实时信息**时（如最新新闻、天气、股票价格、当前热点等）
+- 当你对回答**不确定**或**没有相关知识**时
+- 当用户询问需要**具体数据或事实**支撑的问题时
+- 当话题涉及的内容可能已经**过时**时
+
+### 搜索策略
+1. 先用 web_search 搜索相关关键词
+2. 如果搜索结果摘要不够详细，用 fetch_webpage 获取具体页面内容
+3. 将搜索到的信息自然融入你的回答中
+4. 搜索时最多进行 3 轮工具调用
+
+### 注意事项
+- 搜索到的信息请用自己的话转述，不要直接复制粘贴
+- 如果搜索失败，诚实告知用户"这个我不太清楚呢~"
+- 优先使用你已有的知识，只有在确实需要时才搜索
+"""
 
 # 默认LLM配置
 DEFAULT_MODEL = "doubao-seed-1-8-251228"
@@ -365,7 +504,7 @@ def parse_response_format(response: str, enable_live2d: bool = False) -> dict:
     """
     解析大模型响应中的语气、内容、目光方向和嘴巴状态。
 
-    响应格式：【语气】内容|目光方向|嘴巴状态
+    优先解析 JSON 格式，同时兼容旧格式（【语气】内容|目光方向|嘴巴状态）。
 
     Args:
         response: 大模型生成的原始响应
@@ -381,7 +520,84 @@ def parse_response_format(response: str, enable_live2d: bool = False) -> dict:
         "mouth_state": "close"
     }
 
-    if not response or not response.startswith("【"):
+    if not response:
+        return result
+
+    json_result = _try_parse_json_response(response)
+    if json_result:
+        return json_result
+
+    if response.startswith("【"):
+        return _parse_legacy_format(response, enable_live2d)
+
+    return result
+
+
+def _try_parse_json_response(response: str) -> dict:
+    """尝试从响应中提取并解析 JSON"""
+    result = {
+        "tone": "普通",
+        "content": response,
+        "visual_focus": "center",
+        "mouth_state": "close"
+    }
+
+    json_str = response.strip()
+
+    if "```json" in json_str:
+        start = json_str.find("```json") + 7
+        end = json_str.find("```", start)
+        if end != -1:
+            json_str = json_str[start:end].strip()
+    elif "```" in json_str:
+        start = json_str.find("```") + 3
+        end = json_str.find("```", start)
+        if end != -1:
+            json_str = json_str[start:end].strip()
+
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError:
+        json_start = json_str.find("{")
+        json_end = json_str.rfind("}")
+        if json_start != -1 and json_end != -1 and json_end > json_start:
+            try:
+                data = json.loads(json_str[json_start:json_end + 1])
+            except json.JSONDecodeError:
+                return None
+        else:
+            return None
+
+    if not isinstance(data, dict):
+        return None
+
+    tone = data.get("tone", "普通")
+    if tone in ALLOWED_TONES:
+        result["tone"] = tone
+
+    result["content"] = data.get("content", result["content"])
+
+    visual_focus = data.get("visual_focus", "center")
+    if visual_focus in VALID_DIRECTIONS:
+        result["visual_focus"] = visual_focus
+
+    mouth_state = data.get("mouth_state", "close")
+    if mouth_state in VALID_MOUTH_STATES:
+        result["mouth_state"] = mouth_state
+
+    return result
+
+
+def _parse_legacy_format(response: str, enable_live2d: bool) -> dict:
+    """解析旧格式：【语气】内容|目光方向|嘴巴状态"""
+    result = {
+        "tone": "普通",
+        "content": response,
+        "visual_focus": "center",
+        "mouth_state": "close"
+    }
+
+    if not response.startswith("【"):
         return result
 
     end_bracket = response.find("】")
@@ -389,27 +605,22 @@ def parse_response_format(response: str, enable_live2d: bool = False) -> dict:
         logger.warning("无效的格式，缺少结束括号】")
         return result
 
-    # 提取语气
     extracted_tone = response[1:end_bracket]
     if extracted_tone in ALLOWED_TONES:
         result["tone"] = extracted_tone
 
-    # 提取剩余部分
     rest = response[end_bracket + 1:].strip()
     parts = rest.split("|")
     result["content"] = parts[0].strip()
 
-    # 只有启用Live2D时才解析动作信息
     if not enable_live2d:
         return result
 
-    # 解析目光方向
     if len(parts) > 1:
         direction = parts[1].strip().lower()
         if direction in VALID_DIRECTIONS:
             result["visual_focus"] = direction
 
-    # 解析嘴巴状态
     if len(parts) > 2:
         mouth = parts[2].strip().lower()
         if mouth in VALID_MOUTH_STATES:
@@ -451,17 +662,28 @@ class LangGraphManager:
         self.memory_manager = get_memory_manager()
         self.processing_danmaku = False
         self.enable_live2d = False
+        self.context_controller = get_context_controller() if context_controller_available else None
 
-    def build_graph(self, enable_tts=False, enable_live2d=False):
+    def build_graph(self, enable_tts=False, enable_live2d=False, enable_cloud_tts=False):
         """
         构建 LangGraph 图结构
 
         Args:
-            enable_tts: 是否启用 TTS 功能
+            enable_tts: 是否启用本地 TTS (GPT-SoVITS) 功能
             enable_live2d: 是否启用 Live2D 功能
+            enable_cloud_tts: 是否启用云端 TTS 功能
         """
         self.enable_live2d = enable_live2d and live2d_available
-        logger.info(f"开始构建 LangGraph 图结构 (TTS: {'启用' if enable_tts else '禁用'}, Live2D: {'启用' if self.enable_live2d else '禁用'})")
+        enable_context_control = self.context_controller is not None
+        use_tts = enable_tts and tts_available
+        use_cloud_tts = enable_cloud_tts and cloud_tts_node_available
+        logger.info(
+            f"开始构建 LangGraph 图结构 "
+            f"(TTS: {'启用' if use_tts else '禁用'}, "
+            f"云端TTS: {'启用' if use_cloud_tts else '禁用'}, "
+            f"Live2D: {'启用' if self.enable_live2d else '禁用'}, "
+            f"上下文控制: {'启用' if enable_context_control else '禁用'})"
+        )
 
         # 创建状态图，使用LLMState作为状态类型
         self.graph = StateGraph(LLMState)
@@ -470,44 +692,59 @@ class LangGraphManager:
         self.graph.add_node("init", self._init_node)
         self.graph.add_node("load_memory", self._load_memory_node)
         self.graph.add_node("rag_retrieval", self._rag_retrieval_node)
+        self.graph.add_node("context_control", self._context_control_node)
         self.graph.add_node("llm_process", self._llm_process_node)
         self.graph.add_node("rag_save", self._rag_save_node)
         self.graph.add_node("save_memory", self._save_memory_node)
         self.graph.add_node("finalize", self._finalize_node)
 
-        # 根据参数决定是否添加 TTS 节点
-        if enable_tts and tts_available:
-            logger.info("添加 TTS 节点到图中")
+        # 根据参数决定是否添加 TTS 节点（本地 GPT-SoVITS）
+        if use_tts:
+            logger.info("添加本地 TTS 节点到图中")
             self.graph.add_node("tts", tts_node)
+
+        # 根据参数决定是否添加云端 TTS 节点
+        if use_cloud_tts:
+            logger.info("添加云端 TTS 节点到图中")
+            self.graph.add_node("cloud_tts", cloud_tts_node)
 
         # 根据参数决定是否添加 Live2D 节点
         if self.enable_live2d:
             logger.info("添加 Live2D 动作联动节点到图中")
             self.graph.add_node("live2d", live2d_action_node)
 
-        # 添加边：init → load_memory → rag_retrieval → llm_process → rag_save → save_memory
+        # 添加边：init → load_memory → rag_retrieval → [context_control] → llm_process → rag_save → save_memory
         self.graph.add_edge(START, "init")
         self.graph.add_edge("init", "load_memory")
         self.graph.add_edge("load_memory", "rag_retrieval")
-        self.graph.add_edge("rag_retrieval", "llm_process")
+
+        if enable_context_control:
+            self.graph.add_edge("rag_retrieval", "context_control")
+            self.graph.add_edge("context_control", "llm_process")
+        else:
+            self.graph.add_edge("rag_retrieval", "llm_process")
+
         self.graph.add_edge("llm_process", "rag_save")
         self.graph.add_edge("rag_save", "save_memory")
 
-        # 根据是否启用 TTS 和 Live2D 决定 save_memory 的下一个节点
+        # 构建 save_memory 之后的分支路径
+        tts_node_name = None
+        if use_tts:
+            tts_node_name = "tts"
+        elif use_cloud_tts:
+            tts_node_name = "cloud_tts"
+
         if self.enable_live2d:
-            # Live2D 在 save_memory 之后、finalize 之前执行
             self.graph.add_edge("save_memory", "live2d")
-            if enable_tts and tts_available:
-                self.graph.add_edge("live2d", "tts")
-                self.graph.add_edge("tts", "finalize")
+            if tts_node_name:
+                self.graph.add_edge("live2d", tts_node_name)
+                self.graph.add_edge(tts_node_name, "finalize")
             else:
                 self.graph.add_edge("live2d", "finalize")
-        elif enable_tts and tts_available:
-            # 只启用 TTS
-            self.graph.add_edge("save_memory", "tts")
-            self.graph.add_edge("tts", "finalize")
+        elif tts_node_name:
+            self.graph.add_edge("save_memory", tts_node_name)
+            self.graph.add_edge(tts_node_name, "finalize")
         else:
-            # 都不启用
             self.graph.add_edge("save_memory", "finalize")
 
         # 编译图
@@ -544,6 +781,55 @@ class LangGraphManager:
             logger.error(f"RAG 检索节点失败: {e}")
             return state
 
+    def _context_control_node(self, state: LLMState) -> LLMState:
+        """上下文控制节点：Token控制、历史压缩、智能选择"""
+        logger.info("执行上下文控制节点")
+
+        try:
+            if not self.context_controller:
+                logger.info("上下文控制器未初始化，跳过")
+                return state
+
+            messages = state.get("messages", [])
+            if not messages:
+                logger.info("无消息需要处理")
+                return state
+
+            user_message = _extract_last_user_message(state)
+            current_query = user_message.get("content", "") if user_message else ""
+
+            system_prompt = state.get("system_prompt", "")
+            additional_context = state.get("context", "")
+
+            result = self.context_controller.process_context(
+                messages=messages,
+                current_query=current_query,
+                system_prompt=system_prompt,
+                additional_context=additional_context
+            )
+
+            processed_messages = result.get("messages", messages)
+            statistics = result.get("statistics", {})
+
+            logger.info(f"上下文控制完成: 原始{statistics.get('original_count', 0)}条 → 处理后{len(processed_messages)}条, "
+                        f"Token使用: {statistics.get('total_tokens', 0)}/{self.context_controller.config.MAX_TOKENS} "
+                        f"({statistics.get('context_usage_percent', 0)}%)")
+
+            if statistics.get("steps"):
+                for step in statistics["steps"]:
+                    logger.debug(f"  {step}")
+
+            state["messages"] = processed_messages
+            state["context_controlled"] = True
+            state["context_stats"] = statistics
+
+            return state
+
+        except Exception as e:
+            logger.error(f"上下文控制节点失败（降级处理）: {e}")
+            state["context_controlled"] = False
+            return state
+
     async def _llm_process_node(self, state: LLMState) -> LLMState:
         """LLM 处理节点：调用大模型生成响应并解析格式"""
         logger.info("执行 LLM 处理节点")
@@ -561,6 +847,10 @@ class LangGraphManager:
                 SYSTEM_PROMPT_LIVE2D if self.enable_live2d else SYSTEM_PROMPT_DEFAULT
             )
 
+            # 如果上下文控制已启用，RAG 上下文已整合到 messages 中，不再需要单独拼接
+            context_controlled = state.get("context_controlled", False)
+            llm_context = None if context_controlled else state.get("context")
+
             # 构建LLM状态
             llm_state = LLMState(
                 messages=state.get("messages", []),
@@ -569,12 +859,12 @@ class LangGraphManager:
                 temperature=DEFAULT_TEMPERATURE,
                 max_tokens=DEFAULT_MAX_TOKENS,
                 question=user_message.get("content", ""),
-                context=state.get("context"),
+                context=llm_context,
                 name=user_message.get("name")
             )
 
             # 根据是否有上下文选择不同节点（均为 async 调用）
-            llm_result = await (context_aware_qa_node(llm_state) if state.get("context")
+            llm_result = await (context_aware_qa_node(llm_state) if llm_context
                                 else llm_chat_node(llm_state))
 
             # 更新状态
@@ -584,7 +874,10 @@ class LangGraphManager:
             state["error"] = llm_result.get("error")
 
             # 使用提取的解析函数（消除嵌套）
-            parsed = parse_response_format(response, enable_live2d=self.enable_live2d)
+            if structured_output_available:
+                parsed = parse_structured_response(response, enable_live2d=self.enable_live2d)
+            else:
+                parsed = parse_response_format(response, enable_live2d=self.enable_live2d)
             state["tone"] = parsed["tone"]
             state["content"] = parsed["content"]
             state["visual_focus"] = parsed["visual_focus"]
@@ -611,8 +904,11 @@ class LangGraphManager:
                     "visual_focus": parsed["visual_focus"],
                     "mouth_state": parsed["mouth_state"]
                 })
-            except Exception:
-                pass
+                logger.info(f"WebSocket 已广播AI回复: {parsed['content'][:50]}")
+            except ImportError as e:
+                logger.warning(f"AI回复广播模块导入失败: {e}")
+            except Exception as e:
+                logger.error(f"AI回复广播失败: {e}")
 
             return state
 
@@ -769,7 +1065,8 @@ class LangGraphManager:
         if not self.graph:
             self.build_graph(
                 enable_tts=args.tts if args else False,
-                enable_live2d=args.live2d if args else False
+                enable_live2d=args.live2d if args else False,
+                enable_cloud_tts=args.cloud_tts if args and hasattr(args, 'cloud_tts') else False
             )
 
         if not initial_state:
@@ -851,7 +1148,10 @@ class LangGraphManager:
 
         global args
         if not self.graph:
-            self.build_graph(enable_tts=args.tts if args else False)
+            self.build_graph(
+                enable_tts=args.tts if args else False,
+                enable_cloud_tts=args.cloud_tts if args and hasattr(args, 'cloud_tts') else False
+            )
 
         if not initial_state:
             initial_state = create_default_llm_state()
@@ -875,13 +1175,14 @@ class LangGraphManager:
         while True:
             await asyncio.sleep(1)
 
-    def rebuild_graph(self, enable_tts=None, enable_live2d=None):
+    def rebuild_graph(self, enable_tts=None, enable_live2d=None, enable_cloud_tts=None):
         """
         重新构建 LangGraph 图结构（用于动态启停功能）
 
         Args:
-            enable_tts: 是否启用 TTS，None 则保持当前设置
+            enable_tts: 是否启用本地 TTS，None 则保持当前设置
             enable_live2d: 是否启用 Live2D，None 则保持当前设置
+            enable_cloud_tts: 是否启用云端 TTS，None 则保持当前设置
         """
         global args
         if args is None:
@@ -892,9 +1193,11 @@ class LangGraphManager:
             enable_tts = args.tts
         if enable_live2d is None:
             enable_live2d = args.live2d and live2d_available
+        if enable_cloud_tts is None:
+            enable_cloud_tts = getattr(args, 'cloud_tts', False)
 
-        logger.info(f"重新构建图结构: TTS={enable_tts}, Live2D={enable_live2d}")
-        self.build_graph(enable_tts=enable_tts, enable_live2d=enable_live2d)
+        logger.info(f"重新构建图结构: TTS={enable_tts}, 云端TTS={enable_cloud_tts}, Live2D={enable_live2d}")
+        self.build_graph(enable_tts=enable_tts, enable_live2d=enable_live2d, enable_cloud_tts=enable_cloud_tts)
 
 
 # ============ 动态功能控制函数 ============
@@ -1009,6 +1312,66 @@ async def disable_tts():
     return True
 
 
+async def enable_cloud_tts():
+    """启用云端 TTS 功能"""
+    global args, cloud_tts_config
+
+    if not cloud_tts_node_available:
+        logger.error("云端 TTS 模块不可用")
+        return False
+
+    if args is None:
+        args = parse_args()
+
+    if args.cloud_tts:
+        logger.info("云端 TTS 已启用")
+        return True
+
+    if cloud_tts_config is None:
+        try:
+            from audio.cloud_tts import CloudTtsConfig
+            cloud_tts_config = CloudTtsConfig(enabled=True)
+            if set_cloud_tts_config:
+                set_cloud_tts_config(cloud_tts_config)
+        except Exception as e:
+            logger.error(f"初始化云端 TTS 配置失败: {e}")
+            return False
+
+    if cloud_tts_config:
+        cloud_tts_config.enabled = True
+
+    args.cloud_tts = True
+    logger.info("云端 TTS 已启用")
+
+    if langgraph_manager:
+        langgraph_manager.rebuild_graph(enable_cloud_tts=True)
+
+    return True
+
+
+async def disable_cloud_tts():
+    """禁用云端 TTS 功能"""
+    global args, cloud_tts_config
+
+    if not (args and getattr(args, 'cloud_tts', False)):
+        logger.info("云端 TTS 未启用")
+        return True
+
+    args.cloud_tts = False
+
+    if cloud_tts_config:
+        cloud_tts_config.enabled = False
+        if set_cloud_tts_config:
+            set_cloud_tts_config(cloud_tts_config)
+
+    logger.info("云端 TTS 已禁用")
+
+    if langgraph_manager:
+        langgraph_manager.rebuild_graph(enable_cloud_tts=False)
+
+    return True
+
+
 async def start_danmaku_listener():
     """启动弹幕监听器"""
     global args, _bili_process
@@ -1057,6 +1420,64 @@ async def stop_danmaku_listener():
         logger.error(f"停止弹幕监听器失败: {e}")
         _bili_process = None
         return False
+
+
+async def enable_vision_danmu():
+    """启用视觉弹幕功能"""
+    global vision_danmu_config, vision_danmu_service, _vision_danmu_task, _message_queue
+
+    if not vision_danmu_available:
+        logger.error("视觉弹幕模块不可用")
+        return False
+
+    if vision_danmu_service and vision_danmu_service.is_running:
+        logger.info("视觉弹幕已在运行")
+        return True
+
+    vision_danmu_config.enabled = True
+
+    if _message_queue is None:
+        _message_queue = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+        _queue_worker_task = asyncio.create_task(_queue_worker())
+
+    try:
+        vision_danmu_service = VisionDanmuService(vision_danmu_config, _message_queue)
+        _vision_danmu_task = asyncio.create_task(vision_danmu_service.start())
+        logger.info(f"视觉弹幕已启用 (间隔={vision_danmu_config.capture_interval}s)")
+        return True
+    except Exception as e:
+        logger.error(f"视觉弹幕启动失败: {e}")
+        vision_danmu_service = None
+        vision_danmu_config.enabled = False
+        return False
+
+
+async def disable_vision_danmu():
+    """禁用视觉弹幕功能"""
+    global vision_danmu_config, vision_danmu_service, _vision_danmu_task
+
+    if not vision_danmu_config.enabled and not (vision_danmu_service and vision_danmu_service.is_running):
+        logger.info("视觉弹幕未启用")
+        return True
+
+    vision_danmu_config.enabled = False
+
+    if _vision_danmu_task and not _vision_danmu_task.done():
+        try:
+            if vision_danmu_service:
+                await vision_danmu_service.stop()
+            _vision_danmu_task.cancel()
+            await _vision_danmu_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"停止视觉弹幕时出错: {e}")
+
+    vision_danmu_service = None
+    _vision_danmu_task = None
+    logger.info("视觉弹幕已禁用")
+    return True
+
 
 async def start_http_server(port=8081):
     """
@@ -1287,6 +1708,78 @@ def main():
         if args.tts:
             logger.info("TTS 已从 config.ini 启用")
 
+    # 加载云端 TTS 配置
+    global cloud_tts_config
+    if _cfg.has_section("cloud_tts") and cloud_tts_node_available:
+        try:
+            from audio.cloud_tts import CloudTtsConfig
+            cloud_tts_config = CloudTtsConfig(
+                provider=_cfg.get("cloud_tts", "provider", fallback="doubao"),
+                enabled=_cfg.getboolean("cloud_tts", "enabled", fallback=False),
+                api_url=_cfg.get("cloud_tts", "api_url", fallback=""),
+                api_key=_cfg.get("cloud_tts", "api_key", fallback=""),
+                api_secret=_cfg.get("cloud_tts", "api_secret", fallback=""),
+                api_version=_cfg.get("cloud_tts", "api_version", fallback="v3"),
+                appid=_cfg.get("cloud_tts", "appid", fallback=""),
+                access_token=_cfg.get("cloud_tts", "access_token", fallback=""),
+                resource_id=_cfg.get("cloud_tts", "resource_id", fallback="seed-tts-2.0"),
+                voice_type=_cfg.get("cloud_tts", "voice_type", fallback="zh_female_vv_uranus_bigtts"),
+                speed=_cfg.getfloat("cloud_tts", "speed", fallback=1.0),
+                volume=_cfg.getfloat("cloud_tts", "volume", fallback=1.0),
+                sample_rate=_cfg.getint("cloud_tts", "sample_rate", fallback=24000),
+                format=_cfg.get("cloud_tts", "format", fallback="pcm"),
+                timeout=_cfg.getint("cloud_tts", "timeout", fallback=30),
+                retry_count=_cfg.getint("cloud_tts", "retry_count", fallback=3),
+                retry_interval=_cfg.getfloat("cloud_tts", "retry_interval", fallback=1.0),
+            )
+            if set_cloud_tts_config:
+                set_cloud_tts_config(cloud_tts_config)
+            logger.info(f"云端 TTS 配置已加载: enabled={cloud_tts_config.enabled}, provider={cloud_tts_config.provider}")
+        except Exception as e:
+            logger.error(f"加载云端 TTS 配置失败: {e}")
+            cloud_tts_config = None
+
+    # 命令行参数覆盖 config.ini 设置
+    if args.cloud_tts:
+        if cloud_tts_config:
+            cloud_tts_config.enabled = True
+        elif cloud_tts_node_available:
+            try:
+                from audio.cloud_tts import CloudTtsConfig
+                cloud_tts_config = CloudTtsConfig(enabled=True)
+                if set_cloud_tts_config:
+                    set_cloud_tts_config(cloud_tts_config)
+            except Exception:
+                pass
+        logger.info("云端 TTS 已通过命令行参数启用")
+
+    # 加载 AI 读弹幕 TTS 配置
+    global danmu_tts_config, vision_danmu_config
+    if _cfg.has_section("danmu_tts"):
+        danmu_tts_config.enabled = _cfg.getboolean("danmu_tts", "enabled", fallback=False)
+        danmu_tts_config.read_interval = _cfg.getint("danmu_tts", "read_interval", fallback=2)
+        danmu_tts_config.max_text_length = _cfg.getint("danmu_tts", "max_text_length", fallback=100)
+        danmu_tts_config.clean_emoji = _cfg.getboolean("danmu_tts", "clean_emoji", fallback=True)
+        logger.info(f"AI 读弹幕 TTS 配置已加载: enabled={danmu_tts_config.enabled}, interval={danmu_tts_config.read_interval}s")
+
+    # 加载视觉弹幕配置
+    if _cfg.has_section("vision_danmu"):
+        vision_danmu_config.enabled = _cfg.getboolean("vision_danmu", "enabled", fallback=False)
+        vision_danmu_config.capture_interval = _cfg.getint("vision_danmu", "capture_interval", fallback=5)
+        vision_danmu_config.target_window = _cfg.get("vision_danmu", "target_window", fallback="")
+        vision_danmu_config.persona = _cfg.get("vision_danmu", "persona", fallback=vision_danmu_config.persona)
+        vision_danmu_config.max_comment_length = _cfg.getint("vision_danmu", "max_comment_length", fallback=30)
+        vision_danmu_config.cooldown = _cfg.getint("vision_danmu", "cooldown", fallback=10)
+        logger.info(f"视觉弹幕配置已加载: enabled={vision_danmu_config.enabled}, interval={vision_danmu_config.capture_interval}s")
+
+    # 命令行参数覆盖 config.ini 设置
+    if args.danmu_tts:
+        danmu_tts_config.enabled = True
+        logger.info("AI 读弹幕 TTS 已通过命令行参数启用")
+    if args.vision_danmu:
+        vision_danmu_config.enabled = True
+        logger.info("视觉弹幕已通过命令行参数启用")
+
     # 如果未指定 room_id，从 config.json 读取默认值
     if args.room_id is None:
         config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "broadcast", "config.json")
@@ -1389,13 +1882,34 @@ def main():
         # 构建图（基础结构 + 可选功能节点）
         langgraph_manager.build_graph(
             enable_tts=args.tts if args else False,
-            enable_live2d=args.live2d and live2d_available if args else False
+            enable_live2d=args.live2d and live2d_available if args else False,
+            enable_cloud_tts=args.cloud_tts if args and hasattr(args, 'cloud_tts') else False
         )
 
         # 初始化消息队列并启动 worker（必须在 HTTP 服务器启动前初始化，否则 API 调用时队列为空）
-        global _message_queue, _queue_worker_task
+        global _message_queue, _queue_worker_task, danmu_tts_service, vision_danmu_service, _vision_danmu_task
         _message_queue = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
         _queue_worker_task = asyncio.create_task(_queue_worker())
+
+        # 初始化 AI 读弹幕 TTS 服务
+        if danmu_tts_available and danmu_tts_config.enabled:
+            try:
+                danmu_tts_service = DanmuTtsService(danmu_tts_config)
+                danmu_tts_service.start()
+                logger.info("AI 读弹幕 TTS 服务已启动")
+            except Exception as e:
+                logger.error(f"AI 读弹幕 TTS 服务启动失败: {e}")
+                danmu_tts_service = None
+
+        # 初始化视觉弹幕服务
+        if vision_danmu_available and vision_danmu_config.enabled:
+            try:
+                vision_danmu_service = VisionDanmuService(vision_danmu_config, _message_queue)
+                _vision_danmu_task = asyncio.create_task(vision_danmu_service.start())
+                logger.info("视觉弹幕服务已启动")
+            except Exception as e:
+                logger.error(f"视觉弹幕服务启动失败: {e}")
+                vision_danmu_service = None
 
         # 启动HTTP服务器（Web 控制台）
         runner = await start_http_server()
@@ -1465,6 +1979,25 @@ def main():
             if live2d_manager:
                 await live2d_manager.disconnect()
                 logger.info("Live2D 连接已关闭")
+
+            # 停止 AI 读弹幕 TTS 服务
+            if danmu_tts_service:
+                try:
+                    danmu_tts_service.stop()
+                    logger.info("AI 读弹幕 TTS 服务已停止")
+                except Exception as e:
+                    logger.warning(f"停止 AI 读弹幕 TTS 服务失败: {e}")
+
+            # 停止视觉弹幕服务
+            if _vision_danmu_task and not _vision_danmu_task.done():
+                try:
+                    if vision_danmu_service:
+                        await vision_danmu_service.stop()
+                    _vision_danmu_task.cancel()
+                    await _vision_danmu_task
+                except Exception:
+                    pass
+                logger.info("视觉弹幕服务已停止")
 
             # 关闭HTTP服务器
             if 'runner' in locals():

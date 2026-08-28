@@ -21,22 +21,22 @@ class DataPersistence:
     数据持久化类（使用连接复用）
     """
     
-    def __init__(self, uri: str = "http://localhost:19530", token: str = "root:Milvus", db_name: str = "LLM"):
+    def __init__(self, uri: str = "", token: str = "", db_name: str = ""):
         """
         初始化数据持久化对象
         
         Args:
-            uri: Milvus 服务地址
-            token: 认证令牌
-            db_name: 数据库名称
+            uri: Milvus 服务地址（默认从环境变量 MILVUS_URI 读取）
+            token: 认证令牌（默认从环境变量 MILVUS_TOKEN 读取）
+            db_name: 数据库名称（默认从环境变量 MILVUS_DB 读取）
         """
-        self.uri = uri
-        self.token = token
-        self.db_name = db_name
+        self.uri = uri or os.getenv("MILVUS_URI", "http://localhost:19530")
+        self.token = token or os.getenv("MILVUS_TOKEN", "")
+        self.db_name = db_name or os.getenv("MILVUS_DB", "LLM")
         self.manager = get_connection_manager(
-            uri=uri,
-            token=token,
-            db_name=db_name
+            uri=self.uri,
+            token=self.token,
+            db_name=self.db_name
         )
         self.client = None
     

@@ -92,10 +92,10 @@ def add_knowledge_node(state: RAGTestState) -> RAGTestState:
         if not state.get("documents"):
             raise ValueError("缺少documents参数")
         
-        # 初始化Milvus客户端
+        # 初始化Milvus客户端（从环境变量读取）
         client = init_milvus_client(
-            uri="http://localhost:19530",
-            token="root:Milvus",
+            uri=os.getenv("MILVUS_URI", "http://localhost:19530"),
+            token=os.getenv("MILVUS_TOKEN", ""),
             db_name=state["db_name"]
         )
         
@@ -182,10 +182,10 @@ def delete_knowledge_node(state: RAGTestState) -> RAGTestState:
         if not state.get("documents"):
             raise ValueError("缺少documents参数")
         
-        # 初始化Milvus客户端
+        # 初始化Milvus客户端（从环境变量读取）
         client = init_milvus_client(
-            uri="http://localhost:19530",
-            token="root:Milvus",
+            uri=os.getenv("MILVUS_URI", "http://localhost:19530"),
+            token=os.getenv("MILVUS_TOKEN", ""),
             db_name=state["db_name"]
         )
         
@@ -261,10 +261,10 @@ def query_knowledge_node(state: RAGTestState) -> RAGTestState:
         if not state.get("query_text"):
             raise ValueError("缺少query_text参数")
         
-        # 初始化Milvus客户端
+        # 初始化Milvus客户端（从环境变量读取）
         client = init_milvus_client(
-            uri="http://localhost:19530",
-            token="root:Milvus",
+            uri=os.getenv("MILVUS_URI", "http://localhost:19530"),
+            token=os.getenv("MILVUS_TOKEN", ""),
             db_name=state["db_name"]
         )
         

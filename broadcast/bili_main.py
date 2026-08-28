@@ -95,7 +95,7 @@ _forward_session: Optional[aiohttp.ClientSession] = None
 def _ensure_forward_session() -> aiohttp.ClientSession:
     global _forward_session
     if _forward_session is None or _forward_session.closed:
-        _forward_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))
+        _forward_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
     return _forward_session
 
 
@@ -111,12 +111,16 @@ async def forward_message(openai_message: Dict[str, Any], raw: Dict[str, Any]) -
             json=openai_message,
             headers={'Content-Type': 'application/json'},
         ) as resp:
-            if resp.status >= 300:
+            status = resp.status
+            if status >= 300:
                 txt = await resp.text()
-                logger.warning(f"转发消息到主程序返回非2xx: status={resp.status}, body={txt[:200]}")
+                logger.error(f"转发消息到主程序返回非2xx: status={status}, body={txt[:200]}")
+            else:
+                logger.info(f"✅ 转发成功: {openai_message.get('content', '')[:50]}")
+    except asyncio.TimeoutError:
+        logger.error(f"❌ 转发超时(10s): {openai_message.get('content', '')[:50]}")
     except Exception as e:
-        # 静默处理：主程序可能还没启动，但弹幕监听要继续运行
-        logger.debug(f"转发消息到主程序失败(主程序未就绪?): {e}")
+        logger.error(f"❌ 转发失败: {e}, 消息: {openai_message.get('content', '')[:50]}")
 
 
 # ---------- 消息格式转换 ----------

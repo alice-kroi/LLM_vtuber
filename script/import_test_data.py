@@ -15,10 +15,10 @@ def import_test_data():
     """
     导入测试数据到messages集合（使用连接复用）
     """
-    # 初始化参数
-    uri = "http://localhost:19530"
-    token = "root:Milvus"
-    db_name = "LLM"
+    # 初始化参数（从环境变量读取）
+    uri = os.getenv("MILVUS_URI", "http://localhost:19530")
+    token = os.getenv("MILVUS_TOKEN", "")
+    db_name = os.getenv("MILVUS_DB", "LLM")
     collection_name = "messages"
     
     try:

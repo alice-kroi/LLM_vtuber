@@ -7,6 +7,7 @@ Milvus数据库管理工具
 
 from pymilvus import MilvusClient
 import logging
+import os
 from Millvus_base import get_connection_manager
 
 # 配置日志
@@ -64,8 +65,12 @@ def check_collection_content(db_name, collection_name, limit=10):
         Exception: 操作失败时抛出异常
     """
     try:
-        # 使用连接管理器获取Milvus客户端（指定数据库）
-        manager = get_connection_manager(uri="http://localhost:19530", token="root:Milvus", db_name=db_name)
+        # 使用连接管理器获取Milvus客户端（指定数据库，从环境变量读取）
+        manager = get_connection_manager(
+            uri=os.getenv("MILVUS_URI", "http://localhost:19530"),
+            token=os.getenv("MILVUS_TOKEN", ""),
+            db_name=db_name
+        )
         client = manager.get_client()
         
         print(f"\n=== 检查集合内容: {db_name}.{collection_name} ===")
@@ -132,8 +137,12 @@ def list_collections_in_database(db_name):
         Exception: 操作失败时抛出异常
     """
     try:
-        # 使用连接管理器获取Milvus客户端（指定数据库）
-        manager = get_connection_manager(uri="http://localhost:19530", token="root:Milvus", db_name=db_name)
+        # 使用连接管理器获取Milvus客户端（指定数据库，从环境变量读取）
+        manager = get_connection_manager(
+            uri=os.getenv("MILVUS_URI", "http://localhost:19530"),
+            token=os.getenv("MILVUS_TOKEN", ""),
+            db_name=db_name
+        )
         client = manager.get_client()
         
         # 列出所有集合
@@ -172,8 +181,12 @@ def list_databases():
         Exception: 操作失败时抛出异常
     """
     try:
-        # 使用连接管理器获取Milvus客户端
-        manager = get_connection_manager(uri="http://localhost:19530", token="root:Milvus", db_name="default")
+        # 使用连接管理器获取Milvus客户端（从环境变量读取）
+        manager = get_connection_manager(
+            uri=os.getenv("MILVUS_URI", "http://localhost:19530"),
+            token=os.getenv("MILVUS_TOKEN", ""),
+            db_name="default"
+        )
         client = manager.get_client()
         
         logger.info("成功连接到Milvus服务")

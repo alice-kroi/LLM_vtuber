@@ -54,10 +54,13 @@ class MilvusConnectionManager:
     _instances: Dict[str, 'MilvusConnectionManager'] = {}
     _instance_lock = threading.Lock()
 
-    def __new__(cls, uri: str = "http://localhost:19530",
-                token: str = "root:Milvus",
-                db_name: str = "vtuber",
+    def __new__(cls, uri: str = "",
+                token: str = "",
+                db_name: str = "",
                 **kwargs):
+        uri = uri or os.getenv("MILVUS_URI", "http://localhost:19530")
+        token = token or os.getenv("MILVUS_TOKEN", "")
+        db_name = db_name or os.getenv("MILVUS_DB", "vtuber")
         key = f"{uri}_{token}_{db_name}"
         with cls._instance_lock:
             if key not in cls._instances:
@@ -67,9 +70,9 @@ class MilvusConnectionManager:
                 instance = cls._instances[key]
         return instance
 
-    def __init__(self, uri: str = "http://localhost:19530",
-                 token: str = "root:Milvus",
-                 db_name: str = "vtuber",
+    def __init__(self, uri: str = "",
+                 token: str = "",
+                 db_name: str = "",
                  max_idle_time: int = 300,
                  connection_timeout: int = 10,
                  retry_count: int = 3,
@@ -77,9 +80,9 @@ class MilvusConnectionManager:
         if hasattr(self, '_initialized') and self._initialized:
             return
 
-        self.uri = uri
-        self.token = token
-        self.db_name = db_name
+        self.uri = uri or os.getenv("MILVUS_URI", "http://localhost:19530")
+        self.token = token or os.getenv("MILVUS_TOKEN", "")
+        self.db_name = db_name or os.getenv("MILVUS_DB", "vtuber")
         self.max_idle_time = max_idle_time
         self.connection_timeout = connection_timeout
         self.retry_count = retry_count
@@ -241,9 +244,9 @@ class MilvusConnectionManager:
                 instance.close()
 
 def init_milvus_client(
-    uri: str = "http://localhost:19530",
-    token: str = "root:Milvus",
-    db_name: str = "vtuber",
+    uri: str = "",
+    token: str = "",
+    db_name: str = "",
     max_idle_time: int = 300,
     connection_timeout: int = 10,
     retry_count: int = 3,
@@ -253,9 +256,9 @@ def init_milvus_client(
     初始化Milvus客户端（使用连接复用）
     
     Args:
-        uri: Milvus服务地址
-        token: 认证令牌
-        db_name: 数据库名称
+        uri: Milvus服务地址（默认从环境变量 MILVUS_URI 读取）
+        token: 认证令牌（默认从环境变量 MILVUS_TOKEN 读取）
+        db_name: 数据库名称（默认从环境变量 MILVUS_DB 读取）
         max_idle_time: 最大空闲时间（秒）
         connection_timeout: 连接超时时间（秒）
         retry_count: 重连尝试次数
@@ -284,9 +287,9 @@ def init_milvus_client(
 
 
 def get_connection_manager(
-    uri: str = "http://localhost:19530",
-    token: str = "root:Milvus",
-    db_name: str = "vtuber",
+    uri: str = "",
+    token: str = "",
+    db_name: str = "",
     **kwargs
 ) -> MilvusConnectionManager:
     """
@@ -724,11 +727,10 @@ def run_tests(client: MilvusClient, collection_name: str, embedding_model: Embed
     scalar_query_test(client, collection_name, "测试用户1")
     
 if __name__ == "__main__":
-    # 初始化参数
-   
-    uri = "http://localhost:19530"
-    token = "root:Milvus"
-    db_name = "LLM_vtuber"
+    # 初始化参数（从环境变量读取）
+    uri = os.getenv("MILVUS_URI", "http://localhost:19530")
+    token = os.getenv("MILVUS_TOKEN", "")
+    db_name = os.getenv("MILVUS_DB", "LLM_vtuber")
     collection_name = "chat_history"
     
     # 初始化Milvus客户端

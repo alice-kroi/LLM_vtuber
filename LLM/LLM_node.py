@@ -10,6 +10,7 @@
 两个函数都委托给内部的 _run_doubao_chat，避免大量重复。
 """
 
+import asyncio
 import logging
 import json
 
@@ -74,10 +75,16 @@ class LLMState(ChatState):
     - question: 当前用户问题
     - context: 上下文信息（RAG 检索结果）
     - name: 消息发送者名称
+    - search_performed: 本轮对话是否执行过搜索
+    - search_results_count: 搜索结果总数
+    - search_rounds: 工具调用轮数
     """
     question: Optional[str] = None
     context: Optional[str] = None
     name: Optional[str] = None
+    search_performed: bool = False
+    search_results_count: int = 0
+    search_rounds: int = 0
 
 
 def _extract_last_user_question(state: LLMState) -> Optional[str]:
@@ -100,6 +107,7 @@ async def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
         state: LLM 状态
         with_context: 是否把 state["context"] 拼接到 system_prompt 末尾
     """
+    MAX_TOOL_ROUNDS = 3
     try:
         logger.info(f"执行 {'上下文感知问答' if with_context else '大模型对话'} 节点")
 
@@ -124,22 +132,27 @@ async def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
             name=state.get("name")
         )
 
-        # 第一轮调用（可能返回 tool_calls）
         tools = _get_all_tools()
-        result = doubao_chat_node(chat_state, tools=tools if tools else None)
+        tool_round = 0
+        had_tool_calls = False
+        search_results_count = 0
 
-        # 如果 LLM 返回了 tool_calls，执行工具后再次调用 LLM
-        tool_calls = result.get("tool_calls")
-        if tool_calls:
+        while True:
+            logger.info(f"[LLM] 工具调用第 {tool_round} 轮")
+            result = doubao_chat_node(chat_state, tools=tools if tools else None)
+
+            tool_calls = result.get("tool_calls")
+            if not tool_calls or tool_round >= MAX_TOOL_ROUNDS:
+                break
+
+            had_tool_calls = True
             logger.info(f"[LLM] 检测到 {len(tool_calls)} 个工具调用: "
                         f"{[tc['name'] for tc in tool_calls]}")
 
-            # 执行工具调用
             tool_results = await _execute_tool_calls(tool_calls)
+            search_results_count += sum(1 for tr in tool_results if tr.get("result") is not None)
 
-            # 将 assistant 的 tool_call 消息和 tool 结果消息加入历史
             new_messages = list(chat_state.get("messages", []))
-            # assistant 消息（带 tool_calls）
             new_messages.append({
                 "role": "assistant",
                 "content": result.get("response") or "",
@@ -155,7 +168,6 @@ async def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
                     for tc in tool_calls
                 ]
             })
-            # tool 结果消息
             for tr in tool_results:
                 new_messages.append({
                     "role": "tool",
@@ -166,17 +178,23 @@ async def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
                 })
 
             chat_state["messages"] = new_messages
+            tool_round += 1
 
-            # 第二轮调用（不再传 tools，让模型直接生成最终回复）
-            logger.info("[LLM] 工具执行完毕，进行第二轮 LLM 调用")
+        if had_tool_calls:
+            logger.info("[LLM] 工具调用完毕，生成最终回答")
             result = doubao_chat_node(chat_state, tools=None)
+
+        search_performed = tool_round > 0
 
         return {
             **state,
             "response": result.get("response"),
             "messages": result.get("messages", state["messages"]),
             "tokens_used": result.get("tokens_used", 0),
-            "error": result.get("error")
+            "error": result.get("error"),
+            "search_performed": search_performed,
+            "search_results_count": search_results_count,
+            "search_rounds": tool_round
         }
 
     except Exception as e:
@@ -191,7 +209,7 @@ async def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
 
 
 async def _execute_tool_calls(tool_calls: list) -> list:
-    """执行工具调用列表，返回结果列表"""
+    """执行工具调用列表，返回结果列表（含独立降级保护）"""
     from tool.tool_node import tool_registry
 
     results = []
@@ -202,10 +220,28 @@ async def _execute_tool_calls(tool_calls: list) -> list:
             "arguments": tc["arguments"]
         }
         logger.info(f"[LLM] 执行工具: {tc['name']}(args={tc['arguments']})")
-        result = await tool_registry.execute_tool(tool_call, timeout=60.0)
-        results.append(result)
-        logger.info(f"[LLM] 工具结果: {tc['name']} -> "
-                    f"{'成功' if result.get('result') else '失败'}")
+        try:
+            result = await asyncio.wait_for(
+                tool_registry.execute_tool(tool_call, timeout=60.0),
+                timeout=60.0
+            )
+            results.append(result)
+            logger.info(f"[LLM] 工具结果: {tc['name']} -> "
+                        f"{'成功' if result.get('result') else '失败'}")
+        except asyncio.TimeoutError:
+            logger.error(f"[LLM] 工具超时: {tc['name']} (60s)")
+            results.append({
+                "tool_call_id": tc["tool_call_id"],
+                "error": f"工具执行超时（超过60秒）",
+                "result": None
+            })
+        except Exception as e:
+            logger.error(f"[LLM] 工具异常: {tc['name']} -> {str(e)}")
+            results.append({
+                "tool_call_id": tc["tool_call_id"],
+                "error": f"工具执行异常: {str(e)}",
+                "result": None
+            })
     return results
 
 

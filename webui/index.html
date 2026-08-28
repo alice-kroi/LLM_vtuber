@@ -500,6 +500,15 @@
       <div class="nav-item" data-page="vision">
         <span class="nav-icon">👁️</span> 视觉
       </div>
+      <div class="nav-item" data-page="milvus">
+        <span class="nav-icon">🗄️</span> Milvus
+      </div>
+      <div class="nav-item" data-page="knowledge">
+        <span class="nav-icon">📚</span> 知识库
+      </div>
+      <div class="nav-item" data-page="context">
+        <span class="nav-icon">🧠</span> 上下文
+      </div>
     </nav>
     <div class="sidebar-footer">
       <div><span class="status-dot" id="sidebarStatus"></span><span id="sidebarStatusText">连接中...</span></div>
@@ -639,6 +648,315 @@
             </label>
           </div>
           <div id="logBuffer" class="message-stream" style="height:550px;"></div>
+        </div>
+      </div>
+
+      <!-- Milvus Management Page -->
+      <div class="page" id="page-milvus">
+        <div class="card">
+          <div class="card-title" style="display:flex; justify-content:space-between; align-items:center;">
+            <span>Milvus 数据管理</span>
+            <button class="btn btn-secondary" style="padding:4px 12px; font-size:12px;" onclick="loadMilvusCollections()">🔄 刷新</button>
+          </div>
+          <div id="milvusColList" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px;">
+            <div style="color:#95a5a6; text-align:center; width:100%; padding:20px;">加载中...</div>
+          </div>
+        </div>
+
+        <div id="milvusDetailPanel" style="display:none; margin-top:16px;">
+          <div class="card">
+            <div class="card-title" style="display:flex; justify-content:space-between; align-items:center;">
+              <span id="milvusDetailTitle">集合详情</span>
+              <div style="display:flex; gap:8px;">
+                <button class="btn btn-secondary" style="padding:4px 12px; font-size:12px;" onclick="milvusLoadCollection()">加载集合</button>
+                <button class="btn" style="padding:4px 12px; font-size:12px; background:#dc3545;" onclick="milvusDropCollection()">删除集合</button>
+              </div>
+            </div>
+            <div id="milvusDetailInfo" style="margin-bottom:12px;"></div>
+          </div>
+
+          <div class="card" style="margin-top:16px;">
+            <div class="card-title">数据查询</div>
+            <div style="display:flex; gap:10px; margin-bottom:12px; align-items:center; flex-wrap:wrap;">
+              <input id="milvusFilter" class="form-input" style="flex:1; min-width:200px;" placeholder="过滤条件，如: session_id == 'xxx'">
+              <input id="milvusLimit" class="form-input" style="width:80px;" value="50" type="number" min="1" max="500">
+              <button class="btn" onclick="milvusQueryData()">查询</button>
+              <select id="milvusMsgType" class="form-input" style="width:140px; padding:4px 8px;" onchange="milvusQuickFilter()">
+                <option value="">全部消息类型</option>
+                <option value="user_message">用户消息</option>
+                <option value="assistant_message">AI回复</option>
+                <option value="knowledge">知识条目</option>
+              </select>
+              <button class="btn btn-secondary" style="padding:4px 10px; font-size:12px; background:#28a745; color:white;" onclick="milvusQuickFilter('real')">只看真实对话</button>
+            </div>
+
+            <div style="display:flex; gap:10px; margin-bottom:12px; align-items:center; flex-wrap:wrap; padding:10px; background:#f0f7ff; border-radius:6px; border:1px solid #d0e3f7;">
+              <span style="color:#0056b3; font-size:13px; font-weight:600;">🕐 时间范围：</span>
+              <input id="milvusStartDate" class="form-input" style="width:150px;" type="date" title="开始日期">
+              <input id="milvusStartTime" class="form-input" style="width:100px;" type="time" value="00:00" title="开始时间">
+              <span style="color:#6c757d;">至</span>
+              <input id="milvusEndDate" class="form-input" style="width:150px;" type="date" title="结束日期">
+              <input id="milvusEndTime" class="form-input" style="width:100px;" type="time" value="23:59" title="结束时间">
+              <button class="btn btn-secondary" style="padding:4px 10px; font-size:12px;" onclick="milvusSetQuickRange('today')">今天</button>
+              <button class="btn btn-secondary" style="padding:4px 10px; font-size:12px;" onclick="milvusSetQuickRange('7days')">近7天</button>
+              <button class="btn btn-secondary" style="padding:4px 10px; font-size:12px;" onclick="milvusSetQuickRange('30days')">近30天</button>
+              <button class="btn btn-secondary" style="padding:4px 10px; font-size:12px;" onclick="milvusClearTimeRange()">清除</button>
+            </div>
+
+            <div style="display:flex; gap:10px; margin-bottom:12px; align-items:center; flex-wrap:wrap; padding:10px; background:#fff5f5; border-radius:6px; border:1px solid #fee;">
+              <strong style="color:#dc3545;">⚠️ 删除操作：</strong>
+              <input id="milvusDeleteIds" class="form-input" style="flex:1; min-width:200px;" placeholder="要删除的 ID，逗号分隔，如: 123,456,789">
+              <span style="color:#6c757d; font-size:12px;">或</span>
+              <input id="milvusDeleteFilter" class="form-input" style="flex:1; min-width:200px;" placeholder="删除条件，如: user_id == 'xxx'">
+              <button class="btn" style="background:#dc3545;" onclick="milvusDeleteData()">删除</button>
+            </div>
+
+            <div id="milvusDataTable" style="max-height:500px; overflow:auto;">
+              <div style="color:#95a5a6; text-align:center; padding:20px;">点击"查询"加载数据</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Knowledge Base Page -->
+      <div class="page" id="page-knowledge">
+        <div class="card">
+          <div class="card-title" style="display:flex; justify-content:space-between; align-items:center;">
+            <span>📚 知识库管理</span>
+            <div style="display:flex; gap:8px;">
+              <button class="btn btn-secondary" style="padding:4px 12px; font-size:12px;" onclick="kbLoadStats()">🔄 刷新统计</button>
+            </div>
+          </div>
+          <div id="kbStats" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px; margin-bottom:16px;">
+            <div style="background:#f0f7ff; padding:16px; border-radius:8px; text-align:center;">
+              <div style="font-size:24px; font-weight:bold; color:#0056b3;" id="kbTotal">0</div>
+              <div style="color:#6c757d; font-size:12px;">文档总数</div>
+            </div>
+            <div style="background:#d4edda; padding:16px; border-radius:8px; text-align:center;">
+              <div style="font-size:24px; font-weight:bold; color:#155724;" id="kbTextCount">0</div>
+              <div style="color:#6c757d; font-size:12px;">文本</div>
+            </div>
+            <div style="background:#fff3cd; padding:16px; border-radius:8px; text-align:center;">
+              <div style="font-size:24px; font-weight:bold; color:#856404;" id="kbDocCount">0</div>
+              <div style="color:#6c757d; font-size:12px;">文档</div>
+            </div>
+            <div style="background:#e2e3e5; padding:16px; border-radius:8px; text-align:center;">
+              <div style="font-size:24px; font-weight:bold; color:#383d41;" id="kbImageCount">0</div>
+              <div style="color:#6c757d; font-size:12px;">图片</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:16px;">
+          <div class="card-title">➕ 添加内容</div>
+          <div style="display:flex; gap:10px; margin-bottom:12px;">
+            <button class="btn" onclick="kbShowAddText()" style="flex:1;">📝 添加文本</button>
+            <button class="btn btn-secondary" onclick="document.getElementById('kbFileInput').click()" style="flex:1;">📁 上传文件</button>
+            <input type="file" id="kbFileInput" multiple style="display:none;" onchange="kbUploadFiles(this.files)">
+          </div>
+
+          <div id="kbAddTextPanel" style="display:none; padding:16px; background:#f8f9fa; border-radius:8px;">
+            <div style="margin-bottom:12px;">
+              <label style="display:block; margin-bottom:4px; font-weight:600;">文本内容</label>
+              <textarea id="kbTextContent" class="form-input" rows="5" placeholder="输入或粘贴文本内容..."></textarea>
+            </div>
+            <div style="margin-bottom:12px;">
+              <label style="display:block; margin-bottom:4px; font-weight:600;">描述（可选）</label>
+              <input id="kbTextDesc" class="form-input" placeholder="简要描述">
+            </div>
+            <div style="margin-bottom:12px;">
+              <label style="display:block; margin-bottom:4px; font-weight:600;">标签（逗号分隔）</label>
+              <input id="kbTextTags" class="form-input" placeholder="如: 教程,技术,AI">
+            </div>
+            <button class="btn" onclick="kbAddText()">提交</button>
+            <button class="btn btn-secondary" onclick="kbHideAddText()">取消</button>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:16px;">
+          <div class="card-title">🔍 搜索知识库</div>
+          <div style="display:flex; gap:10px; margin-bottom:12px; flex-wrap:wrap;">
+            <input id="kbSearchQuery" class="form-input" style="flex:1; min-width:200px;" placeholder="输入搜索查询...">
+            <input id="kbSearchTopK" class="form-input" style="width:80px;" value="5" type="number" min="1" max="50">
+            <select id="kbSearchType" class="form-input" style="width:140px; padding:4px 8px;">
+              <option value="">全部类型</option>
+              <option value="text">文本</option>
+              <option value="document">文档</option>
+              <option value="image">图片</option>
+              <option value="audio">音频</option>
+              <option value="video">视频</option>
+            </select>
+            <button class="btn" onclick="kbSearch()">搜索</button>
+          </div>
+          <div id="kbSearchResults" style="max-height:400px; overflow:auto;">
+            <div style="color:#95a5a6; text-align:center; padding:20px;">输入查询进行搜索</div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:16px;">
+          <div class="card-title" style="display:flex; justify-content:space-between; align-items:center;">
+            <span>📋 文档列表</span>
+            <button class="btn btn-secondary" style="padding:4px 12px; font-size:12px;" onclick="kbLoadDocuments()">刷新</button>
+          </div>
+          <div style="display:flex; gap:10px; margin-bottom:12px; flex-wrap:wrap;">
+            <select id="kbListType" class="form-input" style="width:140px; padding:4px 8px;" onchange="kbLoadDocuments()">
+              <option value="">全部类型</option>
+              <option value="text">文本</option>
+              <option value="document">文档</option>
+              <option value="image">图片</option>
+              <option value="audio">音频</option>
+              <option value="video">视频</option>
+            </select>
+            <input id="kbListTags" class="form-input" style="flex:1; min-width:150px;" placeholder="标签筛选（逗号分隔）">
+            <button class="btn" onclick="kbLoadDocuments()">筛选</button>
+          </div>
+          <div id="kbDocumentList" style="max-height:500px; overflow:auto;">
+            <div style="color:#95a5a6; text-align:center; padding:20px;">加载中...</div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:16px;">
+          <div class="card-title">🗂️ MinIO 文件管理</div>
+          <div style="display:flex; gap:10px; margin-bottom:12px; align-items:center;">
+            <input id="kbMinioBucket" class="form-input" style="width:160px;" value="knowledge-files" placeholder="存储桶">
+            <input id="kbMinioPrefix" class="form-input" style="flex:1; min-width:150px;" placeholder="前缀（可选）">
+            <button class="btn" onclick="kbListMinioObjects()">列出文件</button>
+          </div>
+          <div id="kbMinioList" style="max-height:300px; overflow:auto;">
+            <div style="color:#95a5a6; text-align:center; padding:20px;">点击"列出文件"加载</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Context Control Page -->
+      <div class="page" id="page-context">
+        <div class="card">
+          <div class="card-title" style="display:flex; justify-content:space-between; align-items:center;">
+            <span>🧠 上下文控制</span>
+            <button class="btn btn-secondary" style="padding:4px 12px; font-size:12px;" onclick="ctxLoadConfig()">🔄 刷新配置</button>
+          </div>
+          <div style="color:#6c757d; margin-bottom:16px; font-size:13px;">
+            控制对话历史的处理方式，包括 Token 限制、历史压缩、智能选择等功能
+          </div>
+
+          <!-- 配置区域 -->
+          <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px;">
+            <div style="padding:16px; background:#f8f9fa; border-radius:8px;">
+              <div style="font-weight:600; margin-bottom:12px; color:#0056b3;">Token 控制</div>
+              <div style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:4px; font-size:12px;">最大 Token 数</label>
+                <input id="ctxMaxTokens" class="form-input" type="number" value="4096" min="1024" max="32768" step="256">
+              </div>
+              <div style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:4px; font-size:12px;">系统预留 Token</label>
+                <input id="ctxSysReserved" class="form-input" type="number" value="512" min="0" max="4096">
+              </div>
+              <div style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:4px; font-size:12px;">最大历史消息数</label>
+                <input id="ctxMaxHistory" class="form-input" type="number" value="20" min="1" max="100">
+              </div>
+            </div>
+
+            <div style="padding:16px; background:#f8f9fa; border-radius:8px;">
+              <div style="font-weight:600; margin-bottom:12px; color:#28a745;">历史压缩</div>
+              <div style="margin-bottom:10px;">
+                <label style="display:flex; align-items:center; gap:8px;">
+                  <input id="ctxSummarizerEnabled" type="checkbox" checked>
+                  <span style="font-size:13px;">启用自动压缩</span>
+                </label>
+              </div>
+              <div style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:4px; font-size:12px;">压缩阈值 (Token)</label>
+                <input id="ctxSummarizerThreshold" class="form-input" type="number" value="3000" min="500" max="16384">
+              </div>
+              <div style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:4px; font-size:12px;">保留最近消息数</label>
+                <input id="ctxMemoryMax" class="form-input" type="number" value="10" min="1" max="50">
+              </div>
+            </div>
+
+            <div style="padding:16px; background:#f8f9fa; border-radius:8px;">
+              <div style="font-weight:600; margin-bottom:12px; color:#ffc107;">检索增强</div>
+              <div style="margin-bottom:10px;">
+                <label style="display:flex; align-items:center; gap:8px;">
+                  <input id="ctxRagEnabled" type="checkbox" checked>
+                  <span style="font-size:13px;">启用 RAG 检索</span>
+                </label>
+              </div>
+              <div style="margin-bottom:10px;">
+                <label style="display:block; margin-bottom:4px; font-size:12px;">最大检索文档数</label>
+                <input id="ctxRagMaxDocs" class="form-input" type="number" value="3" min="1" max="10">
+              </div>
+              <div style="margin-bottom:10px;">
+                <label style="display:flex; align-items:center; gap:8px;">
+                  <input id="ctxMemoryEnabled" type="checkbox" checked>
+                  <span style="font-size:13px;">启用短期记忆</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div style="margin-top:16px; display:flex; gap:10px;">
+            <button class="btn" onclick="ctxSaveConfig()">💾 保存配置</button>
+            <button class="btn btn-secondary" onclick="ctxResetConfig()">↩️ 重置默认</button>
+          </div>
+        </div>
+
+        <!-- 测试区域 -->
+        <div class="card" style="margin-top:16px;">
+          <div class="card-title">🧪 上下文测试</div>
+          <div style="color:#6c757d; margin-bottom:12px; font-size:13px;">
+            输入测试消息，查看上下文控制如何处理
+          </div>
+
+          <div style="margin-bottom:12px;">
+            <label style="display:block; margin-bottom:4px; font-weight:600;">系统提示词（可选）</label>
+            <textarea id="ctxTestSystem" class="form-input" rows="2" placeholder="系统角色设定..."></textarea>
+          </div>
+
+          <div style="margin-bottom:12px;">
+            <label style="display:block; margin-bottom:4px; font-weight:600;">历史消息（JSON 格式）</label>
+            <textarea id="ctxTestMessages" class="form-input" rows="6" placeholder='[{"role":"user","content":"你好"},{"role":"assistant","content":"你好！"}]'></textarea>
+            <div style="margin-top:4px; font-size:11px; color:#999;">格式: [{role, content}, ...]</div>
+          </div>
+
+          <div style="margin-bottom:12px;">
+            <label style="display:block; margin-bottom:4px; font-weight:600;">当前查询</label>
+            <input id="ctxTestQuery" class="form-input" placeholder="当前用户的问题...">
+          </div>
+
+          <div style="display:flex; gap:10px; margin-bottom:12px;">
+            <button class="btn" onclick="ctxTestProcess()">🚀 处理上下文</button>
+            <button class="btn btn-secondary" onclick="ctxTestSummarize()">📝 压缩历史</button>
+            <button class="btn btn-secondary" onclick="ctxTestStats()">📊 统计分析</button>
+          </div>
+
+          <div id="ctxTestResult" style="background:#1e1e1e; color:#d4d4d4; padding:12px; border-radius:6px; max-height:300px; overflow:auto; font-family:monospace; font-size:12px;">
+            <div style="color:#6c757d; text-align:center; padding:20px;">点击按钮开始测试</div>
+          </div>
+        </div>
+
+        <!-- 上下文说明 -->
+        <div class="card" style="margin-top:16px;">
+          <div class="card-title">📖 上下文控制说明</div>
+          <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(250px, 1fr)); gap:16px; font-size:13px;">
+            <div style="padding:12px; background:#e3f2fd; border-radius:6px;">
+              <div style="font-weight:600; color:#1565c0; margin-bottom:6px;">1. Token 控制</div>
+              <div style="color:#333;">限制发送给 LLM 的 Token 数量，避免超出模型限制，同时控制成本。</div>
+            </div>
+            <div style="padding:12px; background:#e8f5e9; border-radius:6px;">
+              <div style="font-weight:600; color:#2e7d32; margin-bottom:6px;">2. 历史压缩</div>
+              <div style="color:#333;">当对话历史过长时，自动将早期对话压缩为摘要，保留关键信息。</div>
+            </div>
+            <div style="padding:12px; background:#fff3e0; border-radius:6px;">
+              <div style="font-weight:600; color:#e65100; margin-bottom:6px;">3. 智能选择</div>
+              <div style="color:#333;">根据相关性、重要性、时效性选择最相关的历史消息。</div>
+            </div>
+            <div style="padding:12px; background:#f3e5f5; border-radius:6px;">
+              <div style="font-weight:600; color:#6a1b9a; margin-bottom:6px;">4. 优先级管理</div>
+              <div style="color:#333;">系统提示 > 身份设定 > 知识库 > 长期记忆 > 短期对话。</div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -901,48 +1219,61 @@ function connectWS() {
     document.getElementById('sidebarStatus').classList.remove('offline');
     document.getElementById('sidebarStatusText').textContent = '已连接';
     refreshStatus();
+    console.log('[WS] WebSocket 已连接');
   };
 
   ws.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
+      console.log('[WS] 收到消息:', msg.type, msg.event);
       handleWSMessage(msg);
-    } catch(e) { console.error(e); }
+    } catch(e) { console.error('[WS] 消息解析失败:', e); }
   };
 
   ws.onclose = () => {
     document.getElementById('sidebarStatus').classList.add('offline');
     document.getElementById('sidebarStatusText').textContent = '重连中...';
+    console.log('[WS] WebSocket 已断开，2秒后重连');
     reconnectTimer = setTimeout(connectWS, 2000);
   };
 
-  ws.onerror = () => { ws.close(); };
+  ws.onerror = (e) => { 
+    console.error('[WS] WebSocket 错误:', e);
+    ws.close(); 
+  };
 }
 
 function handleWSMessage(msg) {
-  // 侧边栏状态
-  document.getElementById('wsCount').textContent = msg.data?.connections || document.querySelectorAll('.status-card').length;
-
-  // 顶部状态更新
-  if (msg.type === 'system') {
-    if (msg.event === 'status_change') {
-      setTimeout(refreshStatus, 500);
-      setTimeout(refreshFeatures, 500);
+  try {
+    // 侧边栏状态 - 只更新系统消息的连接数
+    if (msg.type === 'system' && msg.data && msg.data.connections !== undefined) {
+      document.getElementById('wsCount').textContent = msg.data.connections;
     }
-  }
 
-  // 日志实时推送
-  if (msg.type === 'log') {
-    addLogEntry(msg.data);
-  }
-
-  // 消息流
-  if (['danmaku', 'ai_response', 'vision'].includes(msg.type)) {
-    addMessage(msg, 'messageStream');
-    // 如果在消息页面也添加
-    if (document.getElementById('page-messages').classList.contains('active')) {
-      addMessage(msg, 'messageHistoryStream');
+    // 顶部状态更新
+    if (msg.type === 'system') {
+      if (msg.event === 'status_change') {
+        setTimeout(refreshStatus, 500);
+        setTimeout(refreshFeatures, 500);
+      }
     }
+
+    // 日志实时推送
+    if (msg.type === 'log') {
+      addLogEntry(msg.data);
+    }
+
+    // 消息流
+    if (['danmaku', 'ai_response', 'vision'].includes(msg.type)) {
+      console.log('[WS] 处理消息流:', msg.type, msg.data?.content || msg.data?.analysis);
+      addMessage(msg, 'messageStream');
+      // 如果在消息页面也添加
+      if (document.getElementById('page-messages').classList.contains('active')) {
+        addMessage(msg, 'messageHistoryStream');
+      }
+    }
+  } catch(e) {
+    console.error('[WS] 处理消息失败:', e, msg);
   }
 
   // 视觉结果显示
@@ -1083,13 +1414,24 @@ function renderFeatureCards(features) {
       onStop: () => stopFeature('live2d'),
     },
     {
-      key: 'tts', title: 'TTS 语音',
+      key: 'tts', title: 'TTS 语音 (GPT-SoVITS)',
       enabled: features.tts?.enabled,
       available: features.tts?.available,
       statusText: features.tts?.enabled ? '已启用' : '未启用',
       sub: `端口 ${features.tts?.port}`,
       onStart: () => startFeature('tts'),
       onStop: () => stopFeature('tts'),
+    },
+    {
+      key: 'cloud_tts', title: '云端 TTS',
+      enabled: features.cloud_tts?.enabled,
+      available: features.cloud_tts?.available,
+      statusText: features.cloud_tts?.enabled ? '已启用' : '未启用',
+      sub: features.cloud_tts?.api_configured 
+        ? `${features.cloud_tts?.provider} · ${features.cloud_tts?.api_version}` 
+        : '⚠ 未配置API Key',
+      onStart: () => startFeature('cloud_tts'),
+      onStop: () => stopFeature('cloud_tts'),
     },
     {
       key: 'danmaku_listener', title: '弹幕监听',
@@ -1099,6 +1441,15 @@ function renderFeatureCards(features) {
       sub: `房间 ${features.danmaku_listener?.room_id}`,
       onStart: () => startFeature('danmaku_listener'),
       onStop: () => stopFeature('danmaku_listener'),
+    },
+    {
+      key: 'vision_danmu', title: '视觉弹幕',
+      enabled: features.vision_danmu?.enabled,
+      available: features.vision_danmu?.available,
+      statusText: features.vision_danmu?.enabled ? '运行中' : '已停止',
+      sub: `间隔 ${features.vision_danmu?.capture_interval || 5}s`,
+      onStart: () => startFeature('vision_danmu'),
+      onStop: () => stopFeature('vision_danmu'),
     },
   ];
 
@@ -1143,14 +1494,14 @@ async function stopFeature(name) {
 }
 
 async function startAllFeatures() {
-  const features = ['live2d', 'tts', 'danmaku_listener'];
+  const features = ['live2d', 'tts', 'cloud_tts', 'danmaku_listener', 'vision_danmu'];
   for (const f of features) {
     await startFeature(f);
   }
 }
 
 async function stopAllFeatures() {
-  const features = ['danmaku_listener', 'tts', 'live2d'];
+  const features = ['vision_danmu', 'danmaku_listener', 'cloud_tts', 'tts', 'live2d'];
   for (const f of features) {
     await stopFeature(f);
   }
@@ -1168,9 +1519,743 @@ document.querySelectorAll('.nav-item').forEach(item => {
     if (item.dataset.page === 'messages') loadMessages();
     if (item.dataset.page === 'control') refreshFeatures();
     if (item.dataset.page === 'logs') { loadLogs(); toggleLogAutoRefresh(); }
+    if (item.dataset.page === 'milvus') loadMilvusCollections();
     else { clearInterval(logAutoRefreshInterval); logAutoRefreshInterval = null; }
   });
 });
+
+// ============ Milvus 管理 ============
+let milvusCurrentCollection = null;
+
+async function loadMilvusCollections() {
+  const listEl = document.getElementById('milvusColList');
+  listEl.innerHTML = '<div style="color:#95a5a6; text-align:center; width:100%; padding:20px;">加载中...</div>';
+  try {
+    const resp = await fetch('/api/milvus/collections');
+    const data = await resp.json();
+    if (!data.success) { showToast('加载失败', 'error'); return; }
+
+    if (data.collections.length === 0) {
+      listEl.innerHTML = '<div style="color:#95a5a6; text-align:center; width:100%; padding:20px;">暂无集合</div>';
+      return;
+    }
+
+    listEl.innerHTML = data.collections.map(c => `
+      <div class="status-card" style="cursor:pointer; min-width:180px; flex:1;" 
+           onclick="milvusSelectCollection('${c.name}')">
+        <div class="status-card-header">
+          <div class="status-card-title">${c.name}</div>
+          <div class="status-indicator online">${c.count || 0} 条</div>
+        </div>
+        <div class="status-card-sub">${(c.fields || []).join(', ') || '无字段信息'}</div>
+      </div>
+    `).join('');
+    showToast(`加载 ${data.collections.length} 个集合`);
+  } catch(e) {
+    listEl.innerHTML = `<div style="color:#dc3545; text-align:center; width:100%; padding:20px;">加载失败: ${e.message}</div>`;
+    showToast('加载失败', 'error');
+  }
+}
+
+async function milvusSelectCollection(name) {
+  milvusCurrentCollection = name;
+  document.getElementById('milvusDetailPanel').style.display = 'block';
+  document.getElementById('milvusDetailTitle').textContent = `集合: ${name}`;
+  document.getElementById('milvusDetailInfo').innerHTML = '加载中...';
+
+  try {
+    const resp = await fetch(`/api/milvus/collections/${encodeURIComponent(name)}`);
+    const data = await resp.json();
+    if (!data.success) { showToast('加载失败', 'error'); return; }
+
+    const fields = (data.fields || []).map(f => {
+      const fn = f.name || f.get('name', '?');
+      const ft = f.type || f.get('data_type', '?');
+      return `<span style="display:inline-block; padding:2px 6px; margin:2px; background:#e8f4f6; border-radius:4px; font-size:12px;">${fn} (${ft})</span>`;
+    }).join('');
+
+    document.getElementById('milvusDetailInfo').innerHTML = `
+      <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
+        <div><strong>记录数:</strong> ${data.count || 0}</div>
+        <div><strong>状态:</strong> ${data.loaded ? '已加载' : '未加载'}</div>
+        <div><strong>描述:</strong> ${data.description || '无'}</div>
+      </div>
+      <div style="margin-top:8px;"><strong>字段:</strong><br>${fields || '无'}</div>
+    `;
+
+    // Auto query first page
+    milvusQueryData();
+  } catch(e) {
+    document.getElementById('milvusDetailInfo').innerHTML = `<span style="color:#dc3545;">加载失败: ${e.message}</span>`;
+  }
+}
+
+async function milvusQueryData() {
+  if (!milvusCurrentCollection) return;
+  const tableEl = document.getElementById('milvusDataTable');
+  tableEl.innerHTML = '<div style="color:#95a5a6; text-align:center; padding:20px;">查询中...</div>';
+
+  const filter = document.getElementById('milvusFilter').value.trim();
+  const limit = document.getElementById('milvusLimit').value || 50;
+  const params = new URLSearchParams({ limit });
+  if (filter) params.set('filter', filter);
+
+  const startDate = document.getElementById('milvusStartDate').value;
+  const startTime = document.getElementById('milvusStartTime').value;
+  const endDate = document.getElementById('milvusEndDate').value;
+  const endTime = document.getElementById('milvusEndTime').value;
+
+  if (startDate) {
+    params.set('start_time', `${startDate}T${startTime || '00:00'}:00Z`);
+  }
+  if (endDate) {
+    params.set('end_time', `${endDate}T${endTime || '23:59'}:59Z`);
+  }
+
+  try {
+    const resp = await fetch(`/api/milvus/collections/${encodeURIComponent(milvusCurrentCollection)}/data?${params}`);
+    const data = await resp.json();
+    if (!data.success) { showToast('查询失败', 'error'); return; }
+
+    const rows = data.data || [];
+    if (rows.length === 0) {
+      tableEl.innerHTML = '<div style="color:#95a5a6; text-align:center; padding:20px;">无数据</div>';
+      return;
+    }
+
+    const cols = Object.keys(rows[0]);
+    const headerRow = cols.map(c => {
+      const isVector = c === 'content_vector' || c.endsWith('_vector');
+      return `<th style="padding:8px; text-align:left; border-bottom:2px solid #e0e4ea; font-weight:600; font-size:12px; background:${isVector ? '#fff5f5' : '#f8f9fa'}; ${isVector ? 'color:#dc3545;' : ''}">${c}${isVector ? ' (向量隐藏)' : ''}</th>`;
+    }).join('');
+
+    const bodyRows = rows.map(r => {
+      const cells = cols.map(c => {
+        let val = r[c];
+        if (c === 'content_vector' || c.endsWith('_vector')) return `<td style="padding:6px 8px; border-bottom:1px solid #edf0f4; font-size:12px; color:#dc3545; text-align:center;">[向量数据 ${Array.isArray(val) ? val.length + '维' : ''}]</td>`;
+        if (typeof val === 'string' && val.length > 80) val = val.substring(0, 80) + '...';
+        if (typeof val === 'number' && !Number.isInteger(val)) val = val.toFixed(4);
+        return `<td style="padding:6px 8px; border-bottom:1px solid #edf0f4; font-size:12px; max-width:200px; overflow:hidden; text-overflow:ellipsis;">${val ?? ''}</td>`;
+      }).join('');
+      return `<tr>${cells}</tr>`;
+    }).join('');
+
+    tableEl.innerHTML = `
+      <div style="margin-bottom:8px; font-size:12px; color:#6c757d;">共 ${data.total} 条，显示 ${rows.length} 条</div>
+      <table style="width:100%; border-collapse:collapse;">
+        <thead><tr>${headerRow}</tr></thead>
+        <tbody>${bodyRows}</tbody>
+      </table>
+    `;
+  } catch(e) {
+    tableEl.innerHTML = `<div style="color:#dc3545; text-align:center; padding:20px;">查询失败: ${e.message}</div>`;
+    showToast('查询失败', 'error');
+  }
+}
+
+async function milvusDeleteData() {
+  if (!milvusCurrentCollection) return;
+  const idsStr = document.getElementById('milvusDeleteIds').value.trim();
+  const filterStr = document.getElementById('milvusDeleteFilter').value.trim();
+
+  if (!idsStr && !filterStr) {
+    showToast('请提供 ID 或过滤条件', 'error');
+    return;
+  }
+
+  const msg = idsStr
+    ? `确定删除 ID 为 ${idsStr} 的 ${idsStr.split(',').length} 条数据？`
+    : `确定删除满足条件 "${filterStr}" 的所有数据？`;
+
+  if (!confirm(msg)) return;
+
+  try {
+    const body = { confirm: true };
+    if (idsStr) body.ids = idsStr.split(',').map(id => id.trim()).filter(Boolean);
+    if (filterStr) body.filter = filterStr;
+
+    const resp = await fetch(`/api/milvus/collections/${encodeURIComponent(milvusCurrentCollection)}/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    if (data.success) {
+      showToast('删除成功');
+      milvusQueryData();
+      loadMilvusCollections();
+    } else {
+      showToast(data.error || '删除失败', 'error');
+    }
+  } catch(e) {
+    showToast('删除失败: ' + e.message, 'error');
+  }
+}
+
+async function milvusDropCollection() {
+  if (!milvusCurrentCollection) return;
+  if (!confirm(`⚠️ 确定要删除整个集合 "${milvusCurrentCollection}" 吗？此操作不可恢复！`)) return;
+  if (!confirm('请再次确认：这将删除集合中所有数据！')) return;
+
+  try {
+    const resp = await fetch(`/api/milvus/collections/${encodeURIComponent(milvusCurrentCollection)}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      showToast('集合已删除');
+      document.getElementById('milvusDetailPanel').style.display = 'none';
+      milvusCurrentCollection = null;
+      loadMilvusCollections();
+    } else {
+      showToast(data.error || '删除失败', 'error');
+    }
+  } catch(e) {
+    showToast('删除失败: ' + e.message, 'error');
+  }
+}
+
+function milvusSetQuickRange(type) {
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const fmtDate = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+
+  let start, end;
+  if (type === 'today') {
+    start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+  } else if (type === '7days') {
+    end = new Date(now);
+    start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  } else if (type === '30days') {
+    end = new Date(now);
+    start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  }
+
+  document.getElementById('milvusStartDate').value = fmtDate(start);
+  document.getElementById('milvusStartTime').value = '00:00';
+  document.getElementById('milvusEndDate').value = fmtDate(end);
+  document.getElementById('milvusEndTime').value = '23:59';
+  showToast(`已设置时间范围：${fmtDate(start)} 至 ${fmtDate(end)}`);
+}
+
+function milvusClearTimeRange() {
+  document.getElementById('milvusStartDate').value = '';
+  document.getElementById('milvusStartTime').value = '00:00';
+  document.getElementById('milvusEndDate').value = '';
+  document.getElementById('milvusEndTime').value = '23:59';
+  showToast('已清除时间范围');
+}
+
+function milvusQuickFilter(type) {
+  const filterInput = document.getElementById('milvusFilter');
+  const msgTypeSelect = document.getElementById('milvusMsgType');
+  
+  if (type === 'real') {
+    // 只看真实对话：过滤掉测试用户和系统用户
+    // 使用 Milvus 兼容的 filter 语法
+    filterInput.value = 'message_type in ["user_message", "assistant_message"] and not user_id like "user_%" and user_id != "assistant"';
+    msgTypeSelect.value = '';
+    showToast('已设置过滤：只看真实对话');
+  } else if (msgTypeSelect.value) {
+    filterInput.value = `message_type == "${msgTypeSelect.value}"`;
+  }
+  milvusQueryData();
+}
+
+async function milvusLoadCollection() {
+  if (!milvusCurrentCollection) return;
+  try {
+    const resp = await fetch(`/api/milvus/collections/${encodeURIComponent(milvusCurrentCollection)}/load`, { method: 'POST' });
+    const data = await resp.json();
+    if (data.success) {
+      showToast('集合已加载');
+      milvusSelectCollection(milvusCurrentCollection);
+    } else {
+      showToast('加载失败', 'error');
+    }
+  } catch(e) {
+    showToast('加载失败: ' + e.message, 'error');
+  }
+}
+
+// ============ Knowledge Base ============
+function kbShowAddText() {
+  document.getElementById('kbAddTextPanel').style.display = 'block';
+}
+function kbHideAddText() {
+  document.getElementById('kbAddTextPanel').style.display = 'none';
+  document.getElementById('kbTextContent').value = '';
+  document.getElementById('kbTextDesc').value = '';
+  document.getElementById('kbTextTags').value = '';
+}
+
+async function kbLoadStats() {
+  try {
+    const resp = await fetch('/api/knowledge/stats');
+    const data = await resp.json();
+    if (data.success) {
+      const stats = data.data;
+      document.getElementById('kbTotal').textContent = stats.total || 0;
+      document.getElementById('kbTextCount').textContent = stats.by_type?.text || 0;
+      document.getElementById('kbDocCount').textContent = stats.by_type?.document || 0;
+      document.getElementById('kbImageCount').textContent = stats.by_type?.image || 0;
+    }
+  } catch(e) { console.error(e); }
+}
+
+async function kbAddText() {
+  const text = document.getElementById('kbTextContent').value.trim();
+  const description = document.getElementById('kbTextDesc').value.trim();
+  const tagsStr = document.getElementById('kbTextTags').value.trim();
+  const tags = tagsStr ? tagsStr.split(',').map(t => t.trim()).filter(t => t) : [];
+
+  if (!text) {
+    showToast('请输入文本内容', 'error');
+    return;
+  }
+
+  try {
+    showToast('正在添加...');
+    const resp = await fetch('/api/knowledge/add-text', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text, description, tags})
+    });
+    const data = await resp.json();
+    if (data.success) {
+      showToast('添加成功');
+      kbHideAddText();
+      kbLoadStats();
+      kbLoadDocuments();
+    } else {
+      showToast('添加失败: ' + data.message, 'error');
+    }
+  } catch(e) {
+    showToast('添加失败: ' + e.message, 'error');
+  }
+}
+
+async function kbUploadFiles(files) {
+  if (!files || files.length === 0) return;
+  
+  showToast(`正在上传 ${files.length} 个文件...`);
+  
+  for (const file of files) {
+    try {
+      const reader = new FileReader();
+      const fileData = await new Promise((resolve, reject) => {
+        reader.onload = () => resolve(reader.result.split(',')[1] || '');
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const resp = await fetch('/api/knowledge/upload', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          file_data: fileData,
+          filename: file.name,
+          description: `上传自: ${file.name}`,
+          tags: [],
+          uploaded_by: 'webui'
+        })
+      });
+      const data = await resp.json();
+      if (data.success) {
+        showToast(`已添加: ${file.name}`);
+      } else {
+        showToast(`失败: ${file.name}`, 'error');
+      }
+    } catch(e) {
+      showToast(`上传失败: ${file.name}`, 'error');
+    }
+  }
+  
+  kbLoadStats();
+  kbLoadDocuments();
+}
+
+async function kbSearch() {
+  const query = document.getElementById('kbSearchQuery').value.trim();
+  const topK = parseInt(document.getElementById('kbSearchTopK').value) || 5;
+  const contentType = document.getElementById('kbSearchType').value;
+  const resultsDiv = document.getElementById('kbSearchResults');
+
+  if (!query) {
+    showToast('请输入搜索查询', 'error');
+    return;
+  }
+
+  resultsDiv.innerHTML = '<div style="color:#6c757d; text-align:center; padding:20px;">搜索中...</div>';
+
+  try {
+    const params = new URLSearchParams({query, top_k: topK});
+    if (contentType) params.set('content_type', contentType);
+    
+    const resp = await fetch(`/api/knowledge/search?${params}`);
+    const data = await resp.json();
+
+    if (data.success && data.data.length > 0) {
+      resultsDiv.innerHTML = data.data.map(item => {
+        const scoreColor = item.score > 0.8 ? '#28a745' : item.score > 0.5 ? '#ffc107' : '#dc3545';
+        const typeIcons = {text: '📝', document: '📄', image: '🖼️', audio: '🎵', video: '🎬', other: '📦'};
+        const icon = typeIcons[item.content_type] || '📦';
+        
+        return `<div style="padding:12px; margin-bottom:8px; background:#f8f9fa; border-radius:6px; border-left:4px solid ${scoreColor};">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+            <span style="font-weight:600;">${icon} ${item.file_name || '文本内容'}</span>
+            <span style="color:${scoreColor}; font-weight:bold;">相似度: ${(item.score * 100).toFixed(1)}%</span>
+          </div>
+          <div style="font-size:13px; color:#495057; margin-bottom:6px;">${item.content?.substring(0, 200) || item.description || '无内容预览'}${item.content?.length > 200 ? '...' : ''}</div>
+          <div style="display:flex; gap:8px; font-size:12px; color:#6c757d;">
+            ${item.tags?.length ? `<span>🏷️ ${item.tags.join(', ')}</span>` : ''}
+            ${item.download_url ? `<a href="${item.download_url}" target="_blank" style="color:#007bff;">📥 下载</a>` : ''}
+          </div>
+        </div>`;
+      }).join('');
+    } else {
+      resultsDiv.innerHTML = '<div style="color:#95a5a6; text-align:center; padding:20px;">未找到相关内容</div>';
+    }
+  } catch(e) {
+    resultsDiv.innerHTML = '<div style="color:#dc3545; text-align:center; padding:20px;">搜索失败</div>';
+  }
+}
+
+async function kbLoadDocuments() {
+  const listDiv = document.getElementById('kbDocumentList');
+  const contentType = document.getElementById('kbListType').value;
+  const tagsStr = document.getElementById('kbListTags').value.trim();
+  
+  listDiv.innerHTML = '<div style="color:#6c757d; text-align:center; padding:20px;">加载中...</div>';
+
+  try {
+    const params = new URLSearchParams({limit: 100});
+    if (contentType) params.set('content_type', contentType);
+    if (tagsStr) params.set('tags', tagsStr);
+    
+    const resp = await fetch(`/api/knowledge/documents?${params}`);
+    const data = await resp.json();
+
+    if (data.success && data.data.length > 0) {
+      const typeIcons = {text: '📝', document: '📄', image: '🖼️', audio: '🎵', video: '🎬', other: '📦'};
+      listDiv.innerHTML = `
+        <div style="margin-bottom:12px; color:#6c757d;">共 ${data.total} 条记录</div>
+        ${data.data.map(item => {
+          const icon = typeIcons[item.content_type] || '📦';
+          return `<div style="padding:10px; margin-bottom:6px; background:#f8f9fa; border-radius:6px; display:flex; justify-content:space-between; align-items:center;">
+            <div style="flex:1; min-width:0;">
+              <div style="font-weight:600; font-size:13px;">${icon} ${item.file_name || '文本内容'}</div>
+              <div style="font-size:11px; color:#6c757d; margin-top:2px;">
+                ${item.content_type} · ${item.file_size ? (item.file_size / 1024).toFixed(1) + ' KB' : 'N/A'}
+                · ${item.uploaded_by || 'unknown'} · ${item.created_at?.substring(0, 19).replace('T', ' ') || 'N/A'}
+                ${item.tags?.length ? '· 🏷️ ' + item.tags.join(', ') : ''}
+              </div>
+            </div>
+            <button class="btn" style="padding:4px 8px; font-size:11px; background:#dc3545;" onclick="kbDeleteDoc('${item.id}')">删除</button>
+          </div>`;
+        }).join('')}
+      `;
+    } else {
+      listDiv.innerHTML = '<div style="color:#95a5a6; text-align:center; padding:20px;">暂无文档</div>';
+    }
+  } catch(e) {
+    listDiv.innerHTML = '<div style="color:#dc3545; text-align:center; padding:20px;">加载失败</div>';
+  }
+}
+
+async function kbDeleteDoc(docId) {
+  if (!confirm('确定删除此文档吗？')) return;
+  try {
+    const resp = await fetch(`/api/knowledge/documents/${docId}`, {method: 'DELETE'});
+    const data = await resp.json();
+    if (data.success) {
+      showToast('删除成功');
+      kbLoadDocuments();
+      kbLoadStats();
+    } else {
+      showToast('删除失败', 'error');
+    }
+  } catch(e) {
+    showToast('删除失败', 'error');
+  }
+}
+
+async function kbListMinioObjects() {
+  const bucket = document.getElementById('kbMinioBucket').value.trim();
+  const prefix = document.getElementById('kbMinioPrefix').value.trim();
+  const listDiv = document.getElementById('kbMinioList');
+  
+  listDiv.innerHTML = '<div style="color:#6c757d; text-align:center; padding:20px;">加载中...</div>';
+
+  try {
+    const params = new URLSearchParams({bucket});
+    if (prefix) params.set('prefix', prefix);
+    
+    const resp = await fetch(`/api/knowledge/minio/objects?${params}`);
+    const data = await resp.json();
+
+    if (data.success && data.data.length > 0) {
+      listDiv.innerHTML = `
+        <div style="margin-bottom:12px; color:#6c757d;">存储桶: ${bucket} · 共 ${data.data.length} 个文件</div>
+        ${data.data.map(obj => `
+          <div style="padding:8px; margin-bottom:4px; background:#f8f9fa; border-radius:4px; font-family:monospace; font-size:12px;">
+            <div style="word-break:break-all;">📄 ${obj.object_name}</div>
+            <div style="color:#6c757d; margin-top:4px; font-size:11px;">
+              ${(obj.size / 1024).toFixed(1)} KB · ${obj.last_modified?.substring(0, 19).replace('T', ' ') || 'N/A'}
+            </div>
+          </div>
+        `).join('')}
+      `;
+    } else {
+      listDiv.innerHTML = '<div style="color:#95a5a6; text-align:center; padding:20px;">存储桶为空</div>';
+    }
+  } catch(e) {
+    listDiv.innerHTML = '<div style="color:#dc3545; text-align:center; padding:20px;">加载失败</div>';
+  }
+}
+
+// Load KB data when page is shown
+const observer = new MutationObserver((mutations) => {
+  for (const mutation of mutations) {
+    if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+      if (mutation.target.classList.contains('active') && mutation.target.id === 'page-knowledge') {
+        kbLoadStats();
+        kbLoadDocuments();
+      }
+      if (mutation.target.classList.contains('active') && mutation.target.id === 'page-context') {
+        ctxLoadConfig();
+      }
+    }
+  }
+});
+document.querySelectorAll('.page').forEach(p => observer.observe(p, {attributes: true}));
+
+// ============ Context Controller ============
+async function ctxLoadConfig() {
+  try {
+    const resp = await fetch('/api/context/config');
+    const data = await resp.json();
+    if (data.success) {
+      const cfg = data.data;
+      document.getElementById('ctxMaxTokens').value = cfg.max_tokens || 4096;
+      document.getElementById('ctxSysReserved').value = cfg.system_reserved_tokens || 512;
+      document.getElementById('ctxMaxHistory').value = cfg.max_history_messages || 20;
+      document.getElementById('ctxSummarizerEnabled').checked = cfg.summarizer_enabled !== false;
+      document.getElementById('ctxSummarizerThreshold').value = cfg.summarizer_threshold || 3000;
+      document.getElementById('ctxRagEnabled').checked = cfg.rag_enabled !== false;
+      document.getElementById('ctxRagMaxDocs').value = cfg.rag_max_documents || 3;
+      document.getElementById('ctxMemoryEnabled').checked = cfg.memory_enabled !== false;
+      document.getElementById('ctxMemoryMax').value = cfg.memory_max_messages || 10;
+    }
+  } catch(e) { console.error(e); }
+}
+
+async function ctxSaveConfig() {
+  const config = {
+    max_tokens: parseInt(document.getElementById('ctxMaxTokens').value),
+    system_reserved_tokens: parseInt(document.getElementById('ctxSysReserved').value),
+    max_history_messages: parseInt(document.getElementById('ctxMaxHistory').value),
+    summarizer_enabled: document.getElementById('ctxSummarizerEnabled').checked,
+    summarizer_threshold: parseInt(document.getElementById('ctxSummarizerThreshold').value),
+    rag_enabled: document.getElementById('ctxRagEnabled').checked,
+    rag_max_documents: parseInt(document.getElementById('ctxRagMaxDocs').value),
+    memory_enabled: document.getElementById('ctxMemoryEnabled').checked,
+    memory_max_messages: parseInt(document.getElementById('ctxMemoryMax').value),
+  };
+  
+  try {
+    const resp = await fetch('/api/context/config', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(config)
+    });
+    const data = await resp.json();
+    if (data.success) {
+      showToast('配置已保存');
+    } else {
+      showToast('保存失败', 'error');
+    }
+  } catch(e) {
+    showToast('保存失败: ' + e.message, 'error');
+  }
+}
+
+function ctxResetConfig() {
+  document.getElementById('ctxMaxTokens').value = 4096;
+  document.getElementById('ctxSysReserved').value = 512;
+  document.getElementById('ctxMaxHistory').value = 20;
+  document.getElementById('ctxSummarizerEnabled').checked = true;
+  document.getElementById('ctxSummarizerThreshold').value = 3000;
+  document.getElementById('ctxRagEnabled').checked = true;
+  document.getElementById('ctxRagMaxDocs').value = 3;
+  document.getElementById('ctxMemoryEnabled').checked = true;
+  document.getElementById('ctxMemoryMax').value = 10;
+  showToast('已重置为默认值，请点击保存确认');
+}
+
+function ctxGetTestMessages() {
+  const messagesStr = document.getElementById('ctxTestMessages').value.trim();
+  if (!messagesStr) return [];
+  try {
+    return JSON.parse(messagesStr);
+  } catch(e) {
+    showToast('消息格式错误: ' + e.message, 'error');
+    return [];
+  }
+}
+
+async function ctxTestProcess() {
+  const messages = ctxGetTestMessages();
+  const query = document.getElementById('ctxTestQuery').value.trim();
+  const systemPrompt = document.getElementById('ctxTestSystem').value.trim();
+  const resultDiv = document.getElementById('ctxTestResult');
+
+  if (messages.length === 0) {
+    showToast('请输入测试消息', 'error');
+    return;
+  }
+
+  resultDiv.innerHTML = '<div style="color:#6c757d; text-align:center; padding:20px;">处理中...</div>';
+
+  try {
+    const resp = await fetch('/api/context/process', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({messages, query, system_prompt: systemPrompt})
+    });
+    const data = await resp.json();
+    
+    if (data.success) {
+      const result = data.data;
+      const stats = result.statistics;
+      
+      resultDiv.innerHTML = `
+        <div style="color:#4caf50; margin-bottom:10px;">✅ 处理完成</div>
+        <div style="margin-bottom:10px; color:#9cdcfe;">📊 统计信息:</div>
+        <div style="padding-left:20px; margin-bottom:10px;">
+          <div>消息数: ${stats.total_messages}</div>
+          <div>Token数: ${stats.total_tokens}</div>
+          <div>上下文使用率: ${stats.context_usage_percent}%</div>
+          <div>处理步骤: ${stats.steps?.length || 0}</div>
+        </div>
+        <div style="color:#ce9178; margin-bottom:10px;">🔄 处理步骤:</div>
+        <div style="padding-left:20px; margin-bottom:10px;">
+          ${stats.steps?.map(s => `<div>• ${s}</div>`).join('') || '<div>无</div>'}
+        </div>
+        <div style="color:#dcdcaa; margin-bottom:10px;">📨 处理后消息:</div>
+        <div style="padding-left:20px; max-height:150px; overflow:auto;">
+          ${result.messages.map(m => {
+            const role = m.role || 'unknown';
+            const content = (m.content || '').substring(0, 100);
+            return `<div style="margin-bottom:4px;"><span style="color:#569cd6;">[${role}]</span> ${content}${content.length > 100 ? '...' : ''}</div>`;
+          }).join('')}
+        </div>
+      `;
+    } else {
+      resultDiv.innerHTML = '<div style="color:#f44749;">❌ 处理失败</div>';
+    }
+  } catch(e) {
+    resultDiv.innerHTML = '<div style="color:#f44749;">❌ 请求失败: ' + e.message + '</div>';
+  }
+}
+
+async function ctxTestSummarize() {
+  const messages = ctxGetTestMessages();
+  const resultDiv = document.getElementById('ctxTestResult');
+
+  if (messages.length === 0) {
+    showToast('请输入测试消息', 'error');
+    return;
+  }
+
+  resultDiv.innerHTML = '<div style="color:#6c757d; text-align:center; padding:20px;">压缩中...</div>';
+
+  try {
+    const resp = await fetch('/api/context/summarize', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({messages, max_keep: 3})
+    });
+    const data = await resp.json();
+    
+    if (data.success) {
+      const result = data.data;
+      resultDiv.innerHTML = `
+        <div style="color:#4caf50; margin-bottom:10px;">✅ 压缩完成</div>
+        <div style="color:#9cdcfe; margin-bottom:10px;">📈 压缩结果:</div>
+        <div style="padding-left:20px; margin-bottom:10px;">
+          <div>原始消息: ${result.original_count} 条</div>
+          <div>压缩后: ${result.compressed_count} 条</div>
+          <div>压缩比: ${result.original_count > 0 ? Math.round((1 - result.compressed_count/result.original_count) * 100) : 0}%</div>
+        </div>
+        ${result.summary.compressed ? `
+          <div style="color:#ce9178; margin-bottom:10px;">📝 生成的摘要:</div>
+          <div style="padding:10px; background:#2d2d2d; border-radius:4px; margin-bottom:10px;">
+            ${result.summary.summary || '无摘要'}
+          </div>
+          <div style="color:#dcdcaa; margin-bottom:10px;">🔑 关键点:</div>
+          <div style="padding-left:20px;">
+            ${result.summary.key_points?.length ? result.summary.key_points.map(kp => 
+              `<div style="margin-bottom:4px;">[${kp.role}] ${kp.content}</div>`
+            ).join('') : '<div>无</div>'}
+          </div>
+        ` : ''}
+      `;
+    } else {
+      resultDiv.innerHTML = '<div style="color:#f44749;">❌ 压缩失败</div>';
+    }
+  } catch(e) {
+    resultDiv.innerHTML = '<div style="color:#f44749;">❌ 请求失败: ' + e.message + '</div>';
+  }
+}
+
+async function ctxTestStats() {
+  const messages = ctxGetTestMessages();
+  const resultDiv = document.getElementById('ctxTestResult');
+
+  if (messages.length === 0) {
+    showToast('请输入测试消息', 'error');
+    return;
+  }
+
+  resultDiv.innerHTML = '<div style="color:#6c757d; text-align:center; padding:20px;">分析中...</div>';
+
+  try {
+    const resp = await fetch('/api/context/stats', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({messages})
+    });
+    const data = await resp.json();
+    
+    if (data.success) {
+      const stats = data.data;
+      resultDiv.innerHTML = `
+        <div style="color:#4caf50; margin-bottom:10px;">✅ 统计完成</div>
+        <div style="color:#9cdcfe; margin-bottom:10px;">📊 上下文统计:</div>
+        <div style="padding-left:20px; margin-bottom:10px;">
+          <div>总消息数: <span style="color:#ce9178;">${stats.total_messages}</span></div>
+          <div>总 Token 数: <span style="color:#ce9178;">${stats.total_tokens}</span></div>
+          <div>平均 Token/消息: <span style="color:#ce9178;">${stats.avg_tokens_per_msg.toFixed(1)}</span></div>
+          <div>上下文使用率: <span style="color:${stats.context_usage_percent > 80 ? '#f44749' : '#4caf50'};">${stats.context_usage_percent}%</span></div>
+        </div>
+        <div style="color:#dcdcaa; margin-bottom:10px;">📋 角色分布:</div>
+        <div style="padding-left:20px;">
+          ${Object.entries(stats.role_counts).map(([role, count]) => 
+            `<div style="margin-bottom:4px;"><span style="color:#569cd6;">[${role}]</span>: ${count} 条</div>`
+          ).join('')}
+        </div>
+      `;
+    } else {
+      resultDiv.innerHTML = '<div style="color:#f44749;">❌ 统计失败</div>';
+    }
+  } catch(e) {
+    resultDiv.innerHTML = '<div style="color:#f44749;">❌ 请求失败: ' + e.message + '</div>';
+  }
+}
 </script>
 
 </body>

@@ -135,11 +135,11 @@ def insert_chat_data(chat_history: List[Dict[str, Any]]) -> Dict[str, Any]:
         插入结果
     """
     try:
-        # 初始化Milvus客户端
+        # 初始化Milvus客户端（从环境变量读取）
         client = init_milvus_client(
-            uri="http://localhost:19530",
-            token="root:Milvus",
-            db_name="LLM_vtuber"
+            uri=os.getenv("MILVUS_URI", "http://localhost:19530"),
+            token=os.getenv("MILVUS_TOKEN", ""),
+            db_name=os.getenv("MILVUS_DB", "LLM_vtuber")
         )
         
         # 初始化嵌入模型

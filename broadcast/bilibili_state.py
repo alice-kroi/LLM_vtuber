@@ -131,6 +131,8 @@ def load_bilibili_config(config_file: str = "config.json") -> Dict[str, str]:
     """
     加载 Bilibili 配置
     
+    SESSDATA 优先从环境变量 BILIBILI_SESSDATA 读取，其次从配置文件读取。
+    
     Args:
         config_file: 配置文件路径
     
@@ -142,9 +144,18 @@ def load_bilibili_config(config_file: str = "config.json") -> Dict[str, str]:
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
         
+        # 环境变量优先
+        env_sessdata = os.getenv("BILIBILI_SESSDATA", "")
+        if env_sessdata:
+            config["SESSDATA"] = env_sessdata
+        
         return config
     except Exception as e:
         print(f"加载配置文件失败: {e}")
+        # 即使配置文件不存在，也尝试从环境变量读取
+        env_sessdata = os.getenv("BILIBILI_SESSDATA", "")
+        if env_sessdata:
+            return {"SESSDATA": env_sessdata}
         return {}
 
 

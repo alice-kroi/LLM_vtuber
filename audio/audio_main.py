@@ -28,6 +28,16 @@ from audio_deal import (
     get_audio_output_devices
 )
 
+# 云端 TTS 模块（可选）
+try:
+    from cloud_tts import cloud_tts_synthesize, CloudTtsConfig, get_cloud_tts_status
+    cloud_tts_available = True
+except ImportError:
+    cloud_tts_available = False
+    cloud_tts_synthesize = None
+    CloudTtsConfig = None
+    get_cloud_tts_status = None
+
 logger = logging.getLogger("audio_main")
 
 args = None
@@ -849,6 +859,180 @@ async def tts_node(state) -> dict:
             except Exception:
                 pass
             return state
+
+
+# ---------- 云端 TTS 节点 ----------
+
+_cloud_tts_config: Optional[CloudTtsConfig] = None
+
+
+def set_cloud_tts_config(config: CloudTtsConfig):
+    """设置云端 TTS 配置"""
+    global _cloud_tts_config
+    _cloud_tts_config = config
+    if cloud_tts_available:
+        status = get_cloud_tts_status(config)
+        logger.info(f"云端TTS配置已更新: {status}")
+    else:
+        logger.warning("云端TTS模块不可用，请安装依赖")
+
+
+def get_cloud_tts_config() -> Optional[CloudTtsConfig]:
+    """获取当前云端 TTS 配置"""
+    return _cloud_tts_config
+
+
+async def cloud_tts_request_and_play(
+    text: str,
+    config: Optional[CloudTtsConfig] = None,
+    streaming: bool = False,
+) -> Dict[str, Any]:
+    """
+    云端 TTS 合成并播放
+    
+    Args:
+        text: 要合成的文本
+        config: TTS配置，为None时使用全局配置
+        streaming: 是否使用流式模式
+    
+    Returns:
+        Dict[str, Any]: 播放结果
+    """
+    result: Dict[str, Any] = {
+        "success": False,
+        "error": None,
+        "audio_duration": 0.0,
+    }
+
+    cfg = config or _cloud_tts_config
+    if cfg is None or not cfg.enabled:
+        result["error"] = "云端TTS未启用"
+        return result
+
+    if not cloud_tts_available:
+        result["error"] = "云端TTS模块不可用"
+        return result
+
+    if not text:
+        result["error"] = "文本为空"
+        return result
+
+    synthesize_result = await cloud_tts_synthesize(text, cfg, streaming=streaming)
+
+    if not synthesize_result.get("success"):
+        result["error"] = synthesize_result.get("error", "合成失败")
+        logger.error(f"云端TTS合成失败: {result['error']}")
+        return result
+
+    audio_data = synthesize_result.get("audio_data", b"")
+    if not audio_data:
+        result["error"] = "未获取到音频数据"
+        return result
+
+    audio_sample_rate = synthesize_result.get("sample_rate", 24000)
+    audio_format = synthesize_result.get("format", "pcm")
+
+    logger.info(f"云端TTS音频: {len(audio_data)} bytes, 采样率={audio_sample_rate}Hz, 格式={audio_format}, 开始播放...")
+
+    play_result = play_audio_stream(audio_data, sample_rate=audio_sample_rate)
+    if play_result["success"]:
+        result["success"] = True
+        result["audio_duration"] = play_result["duration"]
+        logger.info(f"云端TTS播放成功，时长: {format_duration(play_result['duration'])}")
+    else:
+        result["error"] = f"播放失败: {play_result.get('error', 'unknown')}"
+        logger.error(result["error"])
+
+    return result
+
+
+async def cloud_tts_node(state) -> dict:
+    """
+    LangGraph 云端 TTS 节点（异步）
+    
+    与 tts_node 功能相同，但使用云端 API 替代本地 GPT-SoVITS
+    
+    Args:
+        state: LangGraph状态对象
+    
+    Returns:
+        dict: 更新后的状态
+    """
+    logger.info("=== 执行云端 TTS 节点 ===")
+
+    try:
+        # 检查云端 TTS 是否仍然启用（支持运行时禁用）
+        cfg = get_cloud_tts_config()
+        if not cfg or not cfg.enabled:
+            logger.info("云端 TTS 已禁用，跳过合成")
+            return dict(state) if isinstance(state, dict) else state
+
+        if isinstance(state, dict):
+            text = state.get("response", "")
+        else:
+            text = getattr(state, "response", "")
+
+        if len(text) > 50:
+            logger.info(f"云端TTS节点接收文本: {text[:50]}...")
+        else:
+            logger.info(f"云端TTS节点接收文本: {text}")
+
+        if not text:
+            logger.warning("未找到要合成的文本，跳过云端TTS")
+            return dict(state) if isinstance(state, dict) else state
+
+        tone, content = parse_text_with_tone(text)
+
+        cleaned_content = clean_text_for_tts(content)
+        if cleaned_content != content:
+            removed_len = len(content) - len(cleaned_content)
+            logger.info(f"云端TTS文本清洗: 移除了 {removed_len} 个字符")
+            content = cleaned_content
+
+        if not content:
+            logger.warning("清洗后文本为空，跳过云端TTS")
+            return dict(state) if isinstance(state, dict) else state
+
+        play_result = await cloud_tts_request_and_play(content)
+
+        def _apply(s: dict) -> dict:
+            ns = dict(s)
+            if play_result["success"]:
+                ns["cloud_tts_played"] = True
+                ns["cloud_tts_duration"] = play_result.get("audio_duration", 0.0)
+                logger.info(f"云端TTS播放完成，时长: {play_result.get('audio_duration', 0.0):.2f}s")
+            else:
+                ns["cloud_tts_played"] = False
+                ns["cloud_tts_error"] = play_result.get("error", "unknown")
+                logger.warning(f"云端TTS播放失败: {play_result.get('error')}")
+            return ns
+
+        if isinstance(state, dict):
+            return _apply(state)
+        else:
+            state_dict = {k: state[k] for k in state} if hasattr(state, "__getitem__") else dict(state)
+            updated = _apply(state_dict)
+            try:
+                for k, v in updated.items():
+                    setattr(state, k, v)
+            except Exception:
+                pass
+            return state
+
+    except Exception as e:
+        import traceback
+        logger.error(f"云端TTS节点执行失败: {e}\n{traceback.format_exc()}")
+        if isinstance(state, dict):
+            new_state = dict(state)
+            new_state["cloud_tts_error"] = str(e)
+            return new_state
+        else:
+            try:
+                setattr(state, "cloud_tts_error", str(e))
+            except Exception:
+                pass
+            return state
+
 
 def main():
     """
