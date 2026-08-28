@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Edge 浏览器信息获取工具
@@ -160,6 +160,14 @@ async def web_search(query: str, max_results: int = 5) -> Dict[str, Any]:
     if not query or not query.strip():
         return {"success": False, "error": "搜索关键词不能为空"}
 
+    # ---- 优化方向二 P0-1: 语义缓存检查 ----
+    try:
+        cached = search_cache.get(query.strip())
+        if cached is not None:
+            return cached
+    except Exception as e:
+        logger.debug(f"[语义缓存] 缓存检查异常（降级）: {e}")
+
     engine = _DEFAULT_SEARCH_ENGINE
     url_template = _SEARCH_URLS.get(engine, _SEARCH_URLS["bing"])
     selectors = _SEARCH_SELECTORS.get(engine, _SEARCH_SELECTORS["bing"])
@@ -204,7 +212,16 @@ async def web_search(query: str, max_results: int = 5) -> Dict[str, Any]:
                 continue
 
         logger.info("[browser_tool] web_search 完成，获取 %d 条结果", len(results))
-        return {"success": True, "results": results}
+
+        # ---- 优化方向二 P0-1: 缓存成功结果 ----
+        result = {"success": True, "results": results}
+        if results:  # 只缓存有结果的搜索
+            try:
+                search_cache.put(query.strip(), result)
+            except Exception as e:
+                logger.debug(f"[语义缓存] 缓存写入异常: {e}")
+
+        return result
 
     except PlaywrightError as e:
         error_msg = f"搜索失败: {e}"
@@ -398,3 +415,170 @@ def configure_from_ini(config):
         _DEFAULT_HEADLESS, _DEFAULT_TIMEOUT, _DEFAULT_MAX_CONTENT,
         _DEFAULT_TOOL_TIMEOUT, _DEFAULT_SEARCH_ENGINE,
     )
+
+
+# ============================================================
+# 语义搜索缓存 - 优化方向二 P0-1
+# ============================================================
+
+import math
+import time as _time
+import threading as _threading
+from collections import OrderedDict as _OrderedDict
+
+# 缓存配置
+_CACHE_MAX_SIZE = 50                 # 最多缓存 50 条搜索结果
+_CACHE_TTL = 1800                    # 缓存有效期 30 分钟
+_CACHE_SIMILARITY_THRESHOLD = 0.88   # 相似度阈值（>0.92 视为重复查询）
+
+
+class SemanticSearchCache:
+    """
+    语义搜索缓存器
+
+    使用嵌入模型检测查询相似度，避免对语义相同的重复搜索：
+    - '今天北京天气' vs '北京今日天气' → 命中缓存
+    - 'AI最新进展' vs '人工智能发展'   → 不命中（差异较大）
+
+    线程安全，LRU 淘汰策略。
+    """
+
+    def __init__(self, max_size=_CACHE_MAX_SIZE,
+                 ttl=_CACHE_TTL,
+                 similarity_threshold=_CACHE_SIMILARITY_THRESHOLD):
+        self._cache: _OrderedDict = _OrderedDict()
+        self._embeddings: _OrderedDict = _OrderedDict()
+        self._lock = _threading.Lock()
+        self._embedding_model = None
+        self.max_size = max_size
+        self.ttl = ttl
+        self.threshold = similarity_threshold
+        self.hits = 0
+        self.misses = 0
+
+    def _get_embedding_model(self):
+        """懒加载嵌入模型（复用意图分类器的模型）"""
+        if self._embedding_model is not None:
+            return self._embedding_model
+        try:
+            import sys
+            sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'LLM'))
+            from LLM_node import _get_embed_model
+            self._embedding_model = _get_embed_model()
+            logger.info("[语义缓存] 嵌入模型加载成功")
+            return self._embedding_model
+        except Exception as e:
+            logger.debug(f"[语义缓存] 嵌入模型加载失败（缓存将降级为精确匹配）: {e}")
+            return None
+
+    def _cosine_similarity(self, vec_a, vec_b):
+        """计算两个向量的余弦相似度"""
+        dot = sum(a * b for a, b in zip(vec_a, vec_b))
+        norm_a = math.sqrt(sum(a * a for a in vec_a))
+        norm_b = math.sqrt(sum(b * b for b in vec_b))
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        return dot / (norm_a * norm_b)
+
+    def _compute_embedding(self, query: str):
+        """计算查询的嵌入向量"""
+        model = self._get_embedding_model()
+        if model is None:
+            return None
+        try:
+            vec = model.encode([query], show_progress_bar=False)[0]
+            return vec.tolist() if hasattr(vec, 'tolist') else list(vec)
+        except Exception as e:
+            logger.debug(f"[语义缓存] 嵌入计算失败: {e}")
+            return None
+
+    def _evict_expired(self):
+        """淘汰过期条目"""
+        now = _time.time()
+        expired_keys = [k for k, (_, ts) in self._cache.items() if now - ts > self.ttl]
+        for k in expired_keys:
+            self._cache.pop(k, None)
+            self._embeddings.pop(k, None)
+
+    def _evict_lru(self):
+        """LRU 淘汰最旧条目"""
+        while len(self._cache) > self.max_size:
+            old_key, _ = self._cache.popitem(last=False)
+            self._embeddings.pop(old_key, None)
+
+    def get(self, query: str):
+        """
+        查找缓存（支持语义匹配）
+
+        Returns:
+            缓存的搜索结果，或 None（未命中）
+        """
+        with self._lock:
+            self._evict_expired()
+
+            # 1. 精确匹配
+            if query in self._cache:
+                self.hits += 1
+                self._cache.move_to_end(query)
+                result, _ = self._cache[query]
+                logger.info(f"[语义缓存] 精确命中: '{query[:30]}'")
+                return result
+
+            # 2. 语义匹配
+            query_emb = self._compute_embedding(query)
+            if query_emb is None:
+                self.misses += 1
+                return None
+
+            best_key = None
+            best_sim = 0.0
+            for cached_query, cached_emb in self._embeddings.items():
+                sim = self._cosine_similarity(query_emb, cached_emb)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_key = cached_query
+
+            if best_key and best_sim >= self.threshold:
+                self.hits += 1
+                self._cache.move_to_end(best_key)
+                result, _ = self._cache[best_key]
+                logger.info(f"[语义缓存] 语义命中: '{query[:30]}' ≈ '{best_key[:30]}' (sim={best_sim:.3f})")
+                return result
+
+            self.misses += 1
+            return None
+
+    def put(self, query: str, result):
+        """写入缓存"""
+        with self._lock:
+            query_emb = self._compute_embedding(query)
+            self._cache[query] = (result, _time.time())
+            if query_emb is not None:
+                self._embeddings[query] = query_emb
+            self._evict_expired()
+            self._evict_lru()
+            logger.info(f"[语义缓存] 已缓存: '{query[:30]}' (当前 {len(self._cache)}/{self.max_size})")
+
+    def stats(self):
+        """返回缓存统计"""
+        total = self.hits + self.misses
+        return {
+            "size": len(self._cache),
+            "max_size": self.max_size,
+            "hits": self.hits,
+            "misses": self.misses,
+            "hit_rate": self.hits / total if total > 0 else 0.0,
+        }
+
+    def clear(self):
+        """清空缓存"""
+        with self._lock:
+            self._cache.clear()
+            self._embeddings.clear()
+            self.hits = 0
+            self.misses = 0
+            logger.info("[语义缓存] 已清空")
+
+
+# 全局单例
+search_cache = SemanticSearchCache()

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 RAG（检索增强生成）节点函数模块
@@ -62,8 +62,8 @@ def get_embedding_model() -> DoubaoEmbeddings:
 
 
 # Milvus COSINE 距离阈值：distance = 1 - cosine_similarity，越小越相似
-# distance < 0.65 表示 similarity > 0.35，可根据实际数据分布调整
-MAX_DISTANCE_THRESHOLD = 0.65
+# distance < 0.40 表示 similarity > 0.60，可根据实际数据分布调整
+MAX_DISTANCE_THRESHOLD = 0.40
 
 # Milvus 配置常量
 DEFAULT_COLLECTION = "chat_history"

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Live2D 响应 Pydantic 数据模型
+Live2D 响应 Pydantic 数据模型 (v2 - 路线 A P0 扩展)
 
 定义 Live2D 模块的响应数据结构，包含：
 - 语气 (tone)
 - 内容 (content)
 - 目光方向 (visual_focus)
 - 嘴巴状态 (mouth_state)
+- A-P0 新增: 表情(expression) + 热键(hotkey) + 嘴巴开合强度(mouth_intensity)
 
 同时提供旧格式字符串解析和 JSON Schema 常量，
 用于 function calling 的 response_format。
@@ -16,7 +17,7 @@ Live2D 响应 Pydantic 数据模型
 import json
 import logging
 import re
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel
 
@@ -33,17 +34,44 @@ VALID_DIRECTIONS = {
     "upleft", "upright", "downleft", "downright"
 }
 
+# A-P0: 可用表情类型 (与 EXPRESSION_PARAM_MAP 对应)
+VALID_EXPRESSIONS = {
+    "smile", "angry", "sad", "surprised", "shy",
+    "wink_left", "wink_right", "blink", "neutral"
+}
+
+# A-P0: Tone -> Expression 自动推断表 (兼容没有表情热键的模型)
+TONE_TO_EXPRESSION = {
+    # --- 原始允许值 ---
+    "开心": "smile", "调皮": "smile", "撩拨": "wink_right",
+    "积极": "smile", "感动": "sad", "难过": "sad",
+    "生气": "angry", "急了": "angry", "扮演慌张": "surprised",
+    "惊喜": "surprised", "撒娇": "shy", "尴尬": "shy",
+    "疑问": None, "普通": None, "严肃": None, "假装": None, "自言": None,
+    # --- 扩展常见 tone（LLM 可能返回的额外值） ---
+    "平和": None, "温柔": "smile", "礼貌": None, "冷淡": None,
+    "热情": "smile", "好奇": "surprised", "害羞": "shy",
+    "悲伤": "sad", "愤怒": "angry", "惊讶": "surprised",
+    "开心笑": "smile", "撒娇笑": "shy", "嘲笑": "smile",
+    "无奈": None, "困惑": None, "沉思": None, "淡定": None,
+}
+
 
 class Live2DResponse(BaseModel):
-    """Live2D 响应数据模型
+    """Live2D 响应数据模型 (v2 - 扩展表情/热键)
 
     Attributes:
         tone: 语气，必须是 ALLOWED_TONES 中的值
         content: 说话内容
         visual_focus: 目光方向，必须是 VALID_DIRECTIONS 中的值
         mouth_state: 嘴巴状态，open 或 close
+        mouth_intensity: A-P0 嘴巴开合强度 0.0-1.0，覆盖 mouth_state
+        expression: A-P0 表情名称，None=保持当前
+        expression_intensity: A-P0 表情强度 0.0-1.0
+        hotkey: A-P0 通过名称触发热键动作（需模型有对应热键）
     """
 
+    # --- 基础字段 (v1) ---
     tone: Literal[
         "扮演慌张", "调皮", "尴尬", "感动", "积极", "急了", "假装",
         "惊喜", "开心", "撩拨", "难过", "普通", "撒娇", "生气",
@@ -56,13 +84,23 @@ class Live2DResponse(BaseModel):
     ] = "center"
     mouth_state: Literal["open", "close"] = "close"
 
+    # --- A-P0 新增字段 (可选，LLM 可以不填) ---
+    mouth_intensity: Optional[float] = None      # 0.0-1.0, 覆盖 mouth_state
+    expression: Optional[str] = None              # VALID_EXPRESSIONS 中的值
+    expression_intensity: Optional[float] = None  # 0.0-1.0
+    hotkey: Optional[str] = None                  # 热键名称
+
     def to_dict(self) -> dict:
-        """将响应转换为字典格式"""
+        """将响应转换为字典格式 (包含 A-P0 新字段)"""
         return {
             "tone": self.tone,
             "content": self.content,
             "visual_focus": self.visual_focus,
             "mouth_state": self.mouth_state,
+            "mouth_intensity": self.mouth_intensity,
+            "expression": self.expression,
+            "expression_intensity": self.expression_intensity,
+            "hotkey": self.hotkey,
         }
 
     @classmethod
@@ -111,11 +149,12 @@ class Live2DResponse(BaseModel):
 
 
 # --------- JSON Schema ---------
+# A-P0: 新字段可选，LLM 可以不填 expression/hotkey/mouth_intensity
 LIVE2D_RESPONSE_SCHEMA = {
     "type": "json_schema",
     "json_schema": {
         "name": "live2d_response",
-        "description": "Live2D 虚拟主播响应结构",
+        "description": "Live2D 虚拟主播响应结构 (v2 扩展表情/热键)",
         "strict": True,
         "schema": {
             "type": "object",
@@ -138,6 +177,19 @@ LIVE2D_RESPONSE_SCHEMA = {
                     "type": "string",
                     "enum": ["open", "close"],
                     "description": "嘴巴状态"
+                },
+                "expression": {
+                    "type": ["string", "null"],
+                    "enum": sorted(VALID_EXPRESSIONS) + [None],
+                    "description": "表情名称（可选）：smile开心/angry生气/sad难过/surprised惊讶/shy害羞/wink_left/wink_right眨眼/blink眨眼/neutral中性"
+                },
+                "expression_intensity": {
+                    "type": ["number", "null"],
+                    "description": "表情强度 0.0-1.0（可选）"
+                },
+                "hotkey": {
+                    "type": ["string", "null"],
+                    "description": "触发热键名称（可选，需模型有预设热键）"
                 }
             },
             "required": ["tone", "content", "visual_focus", "mouth_state"],
@@ -200,13 +252,17 @@ def parse_structured_response(response: str, enable_live2d: bool = True) -> dict
         enable_live2d: 是否启用 Live2D 相关解析
 
     Returns:
-        统一格式的响应字典 {"tone", "content", "visual_focus", "mouth_state"}
+        统一格式的响应字典 (包含 expression/hotkey 等 A-P0 字段)
     """
     default_result = {
         "tone": "普通",
         "content": response if response else "",
         "visual_focus": "center",
         "mouth_state": "close",
+        "mouth_intensity": None,
+        "expression": None,
+        "expression_intensity": None,
+        "hotkey": None,
     }
 
     if not response or not isinstance(response, str) or not response.strip():

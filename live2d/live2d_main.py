@@ -56,6 +56,95 @@ DIRECTION_TEMPLATES = {
 }
 VALID_DIRECTIONS = list(DIRECTION_TEMPLATES.keys())
 
+# A-P0: 表情 -> 参数映射表
+# 当模型没有预设表情热键时，通过参数组合模拟表情
+# 注意：参数名需根据实际模型调整（这里用通用名做关键词匹配）
+EXPRESSION_PARAM_MAP = {
+    # 开心/笑容: 嘴角上扬 + 眼睛微弯 + 眉毛稍抬
+    "smile": {
+        "MouthForm": 0.8,          # 嘴型弯曲 (通用名，实际匹配模型参数)
+        "MouthOpenY": 0.25,        # 微张
+        "EyeOpenLeft": 0.85,       # 眯眼 (笑眼)
+        "EyeOpenRight": 0.85,
+        "BrowLY": 0.4,             # 左眉毛稍抬
+        "BrowRY": 0.4,             # 右眉毛稍抬
+        "ParamAngleY": 3.0,        # 头微仰
+    },
+    # 生气: 眉毛下压 + 眼睛眯起 + 嘴抿紧
+    "angry": {
+        "BrowLY": -0.8,
+        "BrowRY": -0.8,
+        "EyeOpenLeft": 0.6,        # 眯眼
+        "EyeOpenRight": 0.6,
+        "MouthOpenY": 0.1,         # 抿嘴
+        "ParamAngleY": -2.0,
+        "ParamAngleX": -3.0,       # 脸稍侧 (怒视)
+    },
+    # 难过: 眉毛内压 + 嘴角下垂 + 眼睛低垂
+    "sad": {
+        "BrowLY": 0.7,             # 眉尾下压
+        "BrowRY": 0.7,
+        "EyeOpenLeft": 0.65,       # 泪眼低垂
+        "EyeOpenRight": 0.65,
+        "MouthForm": -0.6,         # 嘴角下垂
+        "MouthOpenY": 0.15,
+        "FacePositionY": -0.15,    # 头稍低
+        "ParamAngleY": -4.0,
+    },
+    # 惊讶: 眼睛瞪大 + 眉毛高抬 + 嘴微张
+    "surprised": {
+        "EyeOpenLeft": 1.0,        # 全睁
+        "EyeOpenRight": 1.0,
+        "BrowLY": -0.5,            # 眉毛抬起（惊讶时上扬）
+        "BrowRY": -0.5,
+        "MouthOpenY": 0.55,       # 张嘴
+        "MouthForm": 0.3,          # 圆嘴
+        "ParamAngleY": 4.0,
+    },
+    # 害羞: 眼睛半眯 + 眉毛柔和 + 嘴微抿
+    "shy": {
+        "EyeOpenLeft": 0.55,       # 低头眯眼
+        "EyeOpenRight": 0.55,
+        "BrowLY": 0.3,
+        "BrowRY": 0.3,
+        "MouthForm": 0.4,
+        "MouthOpenY": 0.2,
+        "ParamAngleX": -4.0,       # 脸侧开
+        "FacePositionY": -0.08,
+    },
+    # 眨左眼
+    "wink_left": {
+        "EyeOpenLeft": 0.0,
+        "EyeOpenRight": 1.0,
+    },
+    # 眨右眼
+    "wink_right": {
+        "EyeOpenLeft": 1.0,
+        "EyeOpenRight": 0.0,
+    },
+    # 眨眼 (快速)
+    "blink": {
+        "EyeOpenLeft": 0.0,
+        "EyeOpenRight": 0.0,
+    },
+    # 中性/恢复
+    "neutral": {},
+}
+
+# 参数名标准化映射：把 EXPRESSION_PARAM_MAP 中的通用参数名
+# 映射到模型实际的参数名（根据 param_ranges 做模糊匹配）
+_PARAM_NAME_ALIASES = {
+    "EyeOpenLeft": ["EyeOpenLeft", "ParamEyeBallX", "eye_open_l"],
+    "EyeOpenRight": ["EyeOpenRight", "ParamEyeBallY", "eye_open_r"],
+    "MouthOpenY": ["MouthOpenY", "ParamMouthOpenY", "mouth_open"],
+    "MouthForm": ["MouthForm", "ParamMouthForm", "mouth_form"],
+    "BrowLY": ["BrowLY", "ParamBrowLY", "brow_l"],
+    "BrowRY": ["BrowRY", "ParamBrowRY", "brow_r"],
+    "ParamAngleX": ["ParamAngleX", "ParamAngleX"],
+    "ParamAngleY": ["ParamAngleY", "ParamAngleY"],
+    "ParamAngleZ": ["ParamAngleZ", "ParamAngleZ"],
+}
+
 # 动作帧率（每秒下发参数次数）
 _MOVE_FPS = 50
 _MOVE_STEP_SEC = 1.0 / _MOVE_FPS
@@ -143,6 +232,9 @@ class Live2DMain:
 
         # 参数映射信息（保留用于 map/unmap 兼容，但核心逻辑不再使用）
         self.param_ranges: dict[str, dict] = {}
+
+        # A-P0: 模型资源缓存（启动时 discover_model_resources 填充）
+        self.model_capabilities: dict = {"params": {}, "hotkeys": [], "expressions": []}
 
         # 启动时间，用于呼吸晃动计时
         self.start_time = 0.0
@@ -309,14 +401,26 @@ class Live2DMain:
         )
         self._param_log_file.flush()
 
+    # VTS 注入追踪：记录最近一次注入的参数值，用于快照对比
+    _last_injected_values: dict[str, float] = {}
+
     async def _inject_params(self, items: list[tuple[str, float]], source: str = "") -> None:
         """直接用实际值下发参数到 VTube Studio（不经过 map/unmap）。
 
         调用者必须持有 operation_lock。
         """
         self._log_params(items, source)
+        # 记录最近一次注入值（用于快照对比）
+        for name, val in items:
+            self._last_injected_values[name] = val
         parameter_values = [{"id": name, "value": val} for name, val in items]
-        await self.inject_parameter_data(parameter_values, face_found=True, mode="set")
+        resp = await self.inject_parameter_data(parameter_values, face_found=True, mode="set")
+        # 检查 VTS 返回的错误
+        if resp and resp.get("data") and resp["data"].get("errorID", 0):
+            err = resp["data"]
+            logger.warning(f"[inject] VTS 返回错误: errorID={err.get('errorID')}, msg={err.get('message')}, params={parameter_values[:3]}...")
+        elif not resp:
+            logger.warning(f"[inject] 注入返回 None, params={parameter_values[:3]}... source={source}")
 
     # ------------------------------------------------------------------
     # 移动（缓动插值 + 呼吸相位锚定衔接 + 微抖动）
@@ -604,6 +708,79 @@ class Live2DMain:
 
         await self._inject_params(items, source=f"idle:{self.current_direction}")
 
+    # A-P0: VTS 实际参数快照（用于诊断）
+    _SNAPSHOT_KEY_PARAMS = [
+        "FaceAngleX", "FaceAngleY", "FaceAngleZ",
+        "FacePositionX", "FacePositionY", "FacePositionZ",
+        "MouthOpen", "MouthSmile",
+        "EyeOpenLeft", "EyeOpenRight",
+        "BrowLeft", "BrowRight",
+    ]
+
+    async def dump_vts_current_params(self, label: str = "") -> None:
+        """向 VTS 请求当前所有参数的实际值并打日志。
+
+        使用 InputParameterListRequest（返回 FaceAngleX 等人类可读参数名），
+        而非 Live2DParameterListRequest（返回 Param158 等占位名）。
+        调用者必须持有 operation_lock。
+        """
+        try:
+            params_resp = await self.api.get_tracking_parameters()
+            if not params_resp or "data" not in params_resp:
+                logger.warning(f"[快照] get_tracking_parameters 响应无效: {params_resp}")
+                return
+
+            data = params_resp["data"]
+            defaults = data.get("defaultParameters", [])
+            customs = data.get("customParameters", [])
+
+            # 合并所有参数，建立 name -> value 映射
+            all_params = {}
+            for p in defaults + customs:
+                all_params[p.get("name", "")] = p.get("value", 0.0)
+
+            parts = [f"[快照] model=Y({len(defaults)} default + {len(customs)} custom)"]
+            if label:
+                parts.append(f"label={label}")
+
+            # 对比关键参数：期望值 (最近一次注入) vs 实际值 (VTS)
+            key_params = [
+                "FaceAngleX", "FaceAngleY", "FaceAngleZ",
+                "FacePositionX", "FacePositionY",
+                "MouthOpen", "MouthSmile",
+                "EyeOpenLeft", "EyeOpenRight",
+                "Brows",
+            ]
+            for pname in key_params:
+                actual = all_params.get(pname)
+                expected = self._last_injected_values.get(pname, self.core_params.get(pname))
+                if actual is not None:
+                    if expected is not None:
+                        delta = actual - expected
+                        marker = "✓" if abs(delta) < 0.1 else "⚠"
+                        parts.append(f"{pname}={actual:+.3f}(inj={expected:+.3f}{marker})")
+                    else:
+                        parts.append(f"{pname}={actual:+.3f}(no-inj)")
+
+            # 额外：列出 core_params 里有但不在上表中的参数
+            extra_names = [n for n in self.core_params if n not in key_params]
+            if extra_names:
+                extra_preview = []
+                for n in extra_names[:5]:
+                    actual = all_params.get(n, "?")
+                    extra_preview.append(f"{n}={actual:+.2f}" if isinstance(actual, (int, float)) else f"{n}={actual}")
+                parts.append(f"extra=[{', '.join(extra_preview)}]")
+
+            logger.info(" ".join(parts))
+
+            # 检查是否完全没匹配到
+            if not any(all_params.get(p) is not None for p in key_params):
+                all_names = list(all_params.keys())[:15]
+                logger.warning(f"[快照] ⚠️ 关键参数名未匹配！VTS 实际参数名示例: {all_names}")
+
+        except Exception as e:
+            logger.error(f"[快照] 获取 VTS 参数失败: {e}", exc_info=True)
+
     # ------------------------------------------------------------------
     # 连接/登录/初始化/断开
     # ------------------------------------------------------------------
@@ -631,9 +808,24 @@ class Live2DMain:
             return False
         self._ensure_core_params()
         logger.info(f"核心参数初始化完成，共 {len(self.core_params)} 个参数")
+        
+        # 打印前 10 个参数名，确认 VTS 参数名正确
+        param_names_preview = list(self.param_ranges.keys())[:10]
+        logger.info(f"参数预览: {param_names_preview}")
+        
         self.start_time = time.time()
         await self.set_mouth_state(False)
-        logger.info("初始化完成")
+
+        # A-P0: 自动发现模型资源（热键/表情文件）
+        try:
+            resources = await self.discover_model_resources()
+            hk_count = len(resources.get("hotkeys", []))
+            exp_count = len(resources.get("expressions", []))
+            logger.info(f"[资源发现] hotkeys={hk_count}, expressions={exp_count}")
+        except Exception as e:
+            logger.warning(f"[资源发现] 失败(非致命): {e}")
+
+        logger.info("初始化完成 (含表情系统)")
         return True
 
     async def get_parameter_ranges(self) -> bool:
@@ -694,19 +886,252 @@ class Live2DMain:
             return None
 
     # ------------------------------------------------------------------
+    # A-P0 表情 & 热键系统
+    # ------------------------------------------------------------------
+
+    def _resolve_expression_params(self, expression: str) -> list[tuple[str, float]]:
+        """把 EXPRESSION_PARAM_MAP 中的通用参数名映射到模型实际参数名。
+
+        Returns:
+            [(actual_param_name, value), ...] - 只包含模型实际有的参数
+        """
+        expr_params = EXPRESSION_PARAM_MAP.get(expression, {})
+        if not expr_params:
+            return []
+
+        resolved = []
+        for generic_name, value in expr_params.items():
+            # 如果 generic_name 本身就在 param_ranges 里，直接用
+            if generic_name in self.param_ranges:
+                resolved.append((generic_name, float(value)))
+                continue
+            # 尝试通过别名匹配
+            aliases = _PARAM_NAME_ALIASES.get(generic_name, [])
+            found = False
+            for alias in aliases:
+                if alias in self.param_ranges:
+                    resolved.append((alias, float(value)))
+                    found = True
+                    break
+            if not found:
+                # 最后兜底：param_ranges 里模糊搜索
+                low = generic_name.lower()
+                for actual_name in self.param_ranges.keys():
+                    if low in actual_name.lower():
+                        resolved.append((actual_name, float(value)))
+                        found = True
+                        break
+            if not found:
+                logger.debug(f"[表情] 参数 {generic_name} 在模型中未找到，跳过")
+
+        return resolved
+
+    async def set_expression(self, expression: str, intensity: float = 0.8,
+                              duration: float = 2.5) -> bool:
+        """A-P0: 设置表情（通过参数组合或热键）。
+
+        Args:
+            expression: 表情名称，见 EXPRESSION_PARAM_MAP
+            intensity: 表情强度 0.0-1.0（参数值会乘以此系数）
+            duration: 表情持续秒数
+
+        Returns:
+            True 表示成功（已注入参数）
+        """
+        if expression not in EXPRESSION_PARAM_MAP:
+            logger.warning(f"[表情] 未知表情: {expression}")
+            return False
+        if expression == "neutral":
+            logger.info("[表情] neutral，跳过（由 idle 循环保持基础表情）")
+            return True
+
+        resolved = self._resolve_expression_params(expression)
+        if not resolved:
+            logger.warning(f"[表情] {expression} 没有可解析的参数，跳过")
+            return False
+
+        # 应用强度系数
+        resolved_intense = [
+            (name, val * intensity) for name, val in resolved
+        ]
+
+        # 参数范围裁剪
+        items_capped = []
+        for name, val in resolved_intense:
+            pr = self.param_ranges.get(name, {})
+            pmin, pmax = pr.get("min", -1.0), pr.get("max", 1.0)
+            val = max(pmin, min(pmax, val))
+            items_capped.append((name, val))
+
+        logger.info(f"[表情] 设置 {expression} (intensity={intensity}) → {items_capped}")
+
+        # 必须持 operation_lock，否则与 idle/move 的 WebSocket send/recv 交错
+        async with self.operation_lock:
+            await self._inject_params(items_capped, source=f"expression:{expression}")
+            # 立即请求 VTS 确认参数是否真的生效
+            await self.dump_vts_current_params(label=f"after_expression:{expression}")
+
+        # 保存表情状态到 core_params，让 idle 循环持续保持
+        # （但只保存表情专属参数，避免覆盖 direction/breath 参数）
+        for name, val in items_capped:
+            self.core_params[name] = val
+
+        return True
+
+    async def trigger_hotkey(self, hotkey_name: str) -> bool:
+        """A-P0: 通过 VTS HotkeyTriggerRequest 触发热键。
+
+        Args:
+            hotkey_name: 热键名称（模型预设的）
+
+        Returns:
+            True 表示 VTS 返回成功
+        """
+        try:
+            data = {
+                "hotkeyID": hotkey_name,
+                "hotkeyPressType": "Trigger",  # Trigger / KeepDown / KeepUp
+            }
+            if self.api.auth_token:
+                data["authenticationToken"] = self.api.auth_token
+
+            # 持锁：send_request 内部 send+recv 非原子
+            async with self.operation_lock:
+                result = await self.api.send_request(
+                    api_name="VTubeStudioPublicAPI",
+                    message_type="HotkeyTriggerRequest",
+                    data=data,
+                )
+            if result and result.get("messageType") == "HotkeyTriggerResponse":
+                success = result.get("data", {}).get("hotkeyTriggered", False)
+                logger.info(f"[热键] {hotkey_name} → triggered={success}")
+                return success
+            logger.warning(f"[热键] 异常响应: {result}")
+            return False
+        except Exception as e:
+            logger.error(f"[热键] 触发 {hotkey_name} 失败: {e}")
+            return False
+
+    async def trigger_expression_file(self, expression_file: str,
+                                      fade_time: float = 0.5,
+                                      intensity: float = 1.0) -> bool:
+        """A-P0: 激活 VTS 预设的 .exp3.json 表情文件。
+
+        这比参数注入更精确（表情文件由模型作者设计），
+        但需要先知道模型有哪些表情文件（见 discover_model_resources）。
+
+        Args:
+            expression_file: VTS 表情文件名 (不含扩展名)
+            fade_time: 淡入淡出时间（秒）
+            intensity: 表情强度 0.0-1.0
+        """
+        try:
+            data = {
+                "expressionFile": f"{expression_file}.exp3.json",
+                "expression": {
+                    "name": expression_file,
+                    "file": f"{expression_file}.exp3.json",
+                    "active": True,
+                    "inverted": False,
+                    "locked": False,
+                },
+                "fadeTime": fade_time,
+            }
+            if self.api.auth_token:
+                data["authenticationToken"] = self.api.auth_token
+
+            result = await self.api.send_request(
+                api_name="VTubeStudioPublicAPI",
+                message_type="ExpressionActivationRequest",
+                data=data,
+            )
+            ok = result is not None
+            logger.info(f"[表情文件] {expression_file} → fade={fade_time}s, ok={ok}")
+            return ok
+        except Exception as e:
+            logger.error(f"[表情文件] 激活失败: {e}")
+            return False
+
+    async def discover_model_resources(self) -> dict:
+        """A-P0: 查询当前模型的所有可用资源（参数、热键、表情文件）。
+
+        启动时调用一次，缓存到 self.model_capabilities。
+        """
+        result = {"params": {}, "hotkeys": [], "expressions": []}
+
+        # 1. 参数已经在 self.param_ranges 里了（get_parameter_ranges 时缓存）
+        result["params"] = dict(self.param_ranges)
+
+        # 2. 查询热键列表
+        try:
+            hk_data = {
+                "modelName": "",
+                "hotkeyIDs": [],
+            }
+            if self.api.auth_token:
+                hk_data["authenticationToken"] = self.api.auth_token
+            resp = await self.api.send_request(
+                api_name="VTubeStudioPublicAPI",
+                message_type="HotkeyListRequest",
+                data=hk_data,
+            )
+            if resp and resp.get("messageType") == "HotkeyListResponse":
+                result["hotkeys"] = resp.get("data", {}).get("hotkeys", [])
+                logger.info(f"[资源发现] 模型有 {len(result['hotkeys'])} 个热键")
+        except Exception as e:
+            logger.warning(f"[资源发现] 热键列表查询失败: {e}")
+
+        # 3. 查询表情文件列表
+        try:
+            exp_data = {
+                "modelName": "",
+                "expressionFile": "",
+            }
+            if self.api.auth_token:
+                exp_data["authenticationToken"] = self.api.auth_token
+            resp = await self.api.send_request(
+                api_name="VTubeStudioPublicAPI",
+                message_type="CurrentModelDataRequest",
+                data=exp_data,
+            )
+            if resp and resp.get("messageType") == "CurrentModelDataResponse":
+                result["expressions"] = (
+                    resp.get("data", {}).get("modelInformation", {})
+                    .get("expressions", [])
+                )
+                logger.info(f"[资源发现] 模型有 {len(result['expressions'])} 个表情文件")
+        except Exception as e:
+            logger.warning(f"[资源发现] 表情文件查询失败: {e}")
+
+        # 缓存
+        self.model_capabilities = result
+        logger.info(
+            f"[资源发现] 完成: params={len(result['params'])}, "
+            f"hotkeys={len(result['hotkeys'])}, expressions={len(result['expressions'])}"
+        )
+        return result
+
+    # ------------------------------------------------------------------
     # 长运行循环：空闲呼吸 + 指令队列处理
     # ------------------------------------------------------------------
 
     async def idle_movement(self) -> None:
         """空闲呼吸循环：每 tick 持锁下发 core_params + 呼吸。"""
+        _tick_count = 0
+        _start_time = time.time()
+        logger.info(f"[idle] 常态循环已启动，param_ranges={len(self.param_ranges)} params")
         while self.running:
             try:
                 async with self.operation_lock:
                     now = time.time()
                     await self.update_non_moving_state(now)
+                    # 每 200 tick (~60s) 请求一次 VTS 实际参数快照
+                    if _tick_count % 200 == 0:
+                        await self.dump_vts_current_params(label=f"tick={_tick_count}")
+                _tick_count += 1
                 await asyncio.sleep(_MOVE_STEP_SEC)
             except Exception as e:
-                logger.error(f"执行常态运动失败: {e}")
+                logger.error(f"[idle] 执行常态运动失败: {e}")
                 await asyncio.sleep(1.0)
 
     async def add_command(self, command: dict) -> None:

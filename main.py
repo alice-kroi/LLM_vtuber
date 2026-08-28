@@ -312,9 +312,13 @@ async def _queue_worker():
 # Live2D 动作联动节点
 async def live2d_action_node(state: LLMState) -> LLMState:
     """
-    Live2D 动作联动节点
+    Live2D 动作联动节点 (A-P0 扩展版: 表情 + 热键)
 
-    从大模型响应中解析动作信息，执行目光方向和嘴巴状态动作。
+    从大模型响应中解析动作信息，执行：
+    1. 目光方向
+    2. 嘴巴状态
+    3. A-P0: 表情（优先 LLM 指定 expression，否则从 tone 自动推断）
+    4. A-P0: 热键触发（LLM 显式指定 hotkey）
     """
     global live2d_manager
 
@@ -324,8 +328,13 @@ async def live2d_action_node(state: LLMState) -> LLMState:
             parsed = parse_structured_response(response, enable_live2d=True)
         else:
             parsed = parse_response_format(response, enable_live2d=True)
+
+        tone = parsed.get("tone", "普通")
         visual_focus = parsed["visual_focus"]
         mouth_state = parsed["mouth_state"]
+        expression = parsed.get("expression")          # A-P0 新字段
+        expression_intensity = parsed.get("expression_intensity")
+        hotkey = parsed.get("hotkey")                   # A-P0 新字段
 
         if not live2d_manager or not live2d_manager.is_connected:
             logger.warning("Live2D控制器未连接，跳过动作")
@@ -333,11 +342,41 @@ async def live2d_action_node(state: LLMState) -> LLMState:
             state["live2d_message"] = "Live2D控制器未连接"
             return state
 
-        logger.info(f"Live2D节点: 目光={visual_focus}, 嘴巴={mouth_state}")
+        # A-P0: 表情自动推断（当 LLM 没显式输出 expression 时，从 tone 推断）
+        if not expression:
+            from LLM.live2d_models import TONE_TO_EXPRESSION
+            inferred = TONE_TO_EXPRESSION.get(tone)
+            if inferred:
+                logger.info(f"[表情] LLM 未指定 expression，从 tone='{tone}' 推断 → {inferred}")
+                expression = inferred
+            elif inferred is None and tone in TONE_TO_EXPRESSION:
+                # 明确在表里但映射到 None，不输出任何表情
+                pass
+            else:
+                # tone 不在映射表，尝试模糊匹配（关键词包含）
+                tone_lower = tone.lower()
+                _FUZZY = [
+                    ("笑|开心|兴|喜|嗨|甜", "smile"),
+                    ("难过|悲伤|哭|伤心|泪", "sad"),
+                    ("生气|愤怒|怒|讨厌|烦", "angry"),
+                    ("惊讶|吃惊|慌|惊讶", "surprised"),
+                    ("害羞|羞涩|尴尬|脸红|难为情", "shy"),
+                    ("疑问|好奇|疑惑|困惑", None),
+                    ("平和|温柔|普通|礼貌|淡定", None),
+                ]
+                for pat, exp in _FUZZY:
+                    import re as _re
+                    if _re.search(pat, tone):
+                        if exp:
+                            logger.info(f"[表情] tone='{tone}' 未在表中，模糊匹配 → {exp}")
+                            expression = exp
+                        break
+
+        logger.info(f"Live2D节点: tone={tone}, 目光={visual_focus}, 嘴巴={mouth_state}, "
+                    f"expression={expression}, hotkey={hotkey}")
 
         # 执行目光方向动作
         try:
-            # 使用命令行参数 --live2d-speed 控制移动时长（默认3秒）
             duration = args.live2d_speed if args is not None else 3.0
             await live2d_manager.move_to_direction(direction=visual_focus, duration=duration)
             logger.info(f"✓ 执行目光方向: {visual_focus}（时长 {duration:.1f}s）")
@@ -354,8 +393,38 @@ async def live2d_action_node(state: LLMState) -> LLMState:
         except Exception as e:
             logger.error(f"执行嘴巴动作失败: {e}")
 
+        # A-P0: 执行表情动作
+        if expression and live2d_manager:
+            try:
+                intensity = expression_intensity or 0.8
+                ok = await live2d_manager.set_expression(
+                    expression=expression,
+                    intensity=intensity,
+                    duration=args.live2d_speed if args is not None else 2.5,
+                )
+                if ok:
+                    logger.info(f"✓ 执行表情: {expression} (intensity={intensity})")
+                else:
+                    logger.info(f"- 表情 {expression} 未应用（参数缺失或模型不支持）")
+            except Exception as e:
+                logger.error(f"执行表情 {expression} 失败: {e}")
+
+        # A-P0: 执行热键触发
+        if hotkey and live2d_manager:
+            try:
+                ok = await live2d_manager.trigger_hotkey(hotkey)
+                if ok:
+                    logger.info(f"✓ 执行热键: {hotkey}")
+                else:
+                    logger.info(f"- 热键 {hotkey} 未触发（模型中可能不存在）")
+            except Exception as e:
+                logger.error(f"执行热键 {hotkey} 失败: {e}")
+
         state["live2d_status"] = "success"
-        state["live2d_message"] = f"目光:{visual_focus}, 嘴巴:{mouth_state}"
+        state["live2d_message"] = (
+            f"目光:{visual_focus}, 嘴巴:{mouth_state}, "
+            f"表情:{expression or '-'}, 热键:{hotkey or '-'}"
+        )
         return state
 
     except Exception as e:
@@ -678,7 +747,12 @@ class LangGraphManager:
         logger.info("LangGraph 图结构构建完成")
 
     def _rag_retrieval_node(self, state: LLMState) -> LLMState:
-        """RAG 检索节点：从 Milvus 检索相关上下文"""
+        """RAG 检索节点：从 Milvus 检索相关上下文
+
+        优化方向二:
+        - P0-2: 检索短路（短消息 + skip 意图）
+        - P1-2: force_search 短路 + 查询简化 + 动态 top_k
+        """
         logger.info("执行 RAG 检索节点")
 
         try:
@@ -687,11 +761,48 @@ class LangGraphManager:
                 logger.warning("未找到用户消息，跳过 RAG 检索")
                 return state
 
+            query_text = user_message.get("content", "").strip()
+
+            # ---- P0-2 + P1-2: RAG 检索短路 ----
+            intent_action = "normal"
+            try:
+                from LLM.LLM_node import IntentClassifier
+                intent = IntentClassifier.classify(query_text)
+                intent_action = intent["action"]
+            except Exception:
+                pass
+
+            # 1. 极短消息（弹幕刷词）直接跳过
+            if len(query_text) <= 3:
+                logger.info(f"[RAG短路] 消息过短({len(query_text)}字符)，跳过: '{query_text}'")
+                return state
+
+            # 2. skip 意图（问候/道别/感谢）跳过 RAG
+            if intent_action == "skip":
+                logger.info(f"[RAG短路] 意图={intent_action}，跳过 RAG: '{query_text}'")
+                return state
+
+            # 3. P1-2: force_search 意图（实时查询）跳过 RAG
+            #    历史对话对实时信息没有帮助，避免无效 Milvus 调用
+            if intent_action == "force_search":
+                logger.info(f"[RAG短路] 意图={intent_action}(实时查询)，跳过 RAG: '{query_text}'")
+                return state
+
+            # ---- P1-2: 查询简化 ----
+            simplified = self._simplify_query(query_text)
+            if simplified and simplified != query_text:
+                logger.info(f"[RAG优化] 查询简化: '{query_text[:30]}' -> '{simplified[:30]}'")
+                query_text = simplified
+
+            # ---- P1-2: 动态 top_k ----
+            top_k = self._calc_dynamic_top_k(query_text)
+            logger.info(f"[RAG优化] 动态 top_k={top_k} (intent={intent_action}, len={len(query_text)})")
+
             rag_state = RAGState(
-                query_text=user_message.get("content", ""),
+                query_text=query_text,
                 collection_name="chat_history",
                 db_name="LLM_vtuber",
-                query_params={"top_k": 3, "metric_type": "COSINE", "nprobe": 10},
+                query_params={"top_k": top_k, "metric_type": "COSINE", "nprobe": 10},
                 messages=state.get("messages", [])
             )
 
@@ -705,6 +816,28 @@ class LangGraphManager:
         except Exception as e:
             logger.error(f"RAG 检索节点失败: {e}")
             return state
+
+    @staticmethod
+    def _simplify_query(text: str) -> str:
+        """P1-2: RAG 查询简化 - 去掉噪音提高 embedding 准确度"""
+        import re
+        # 去掉 emoji
+        text = re.sub(r'[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF]', '', text)
+        # 压缩超重复字符 (哈哈哈 -> 哈哈)
+        text = re.sub(r'(.)\1{3,}', r'\1\1', text)
+        # 清理首尾
+        text = text.strip('，。！？、,.!? \t')
+        return text
+
+    @staticmethod
+    def _calc_dynamic_top_k(query: str) -> int:
+        """P1-2: 根据查询复杂度动态决定 RAG 返回数量"""
+        qlen = len(query)
+        if qlen <= 10:
+            return 2
+        if qlen <= 30:
+            return 3
+        return 5
 
     def _context_control_node(self, state: LLMState) -> LLMState:
         """上下文控制节点：Token控制、历史压缩、智能选择"""

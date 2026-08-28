@@ -31,38 +31,24 @@ logs/
 Thumbs.db
 
 # ===== 敏感配置文件 =====
-# 包含密钥的配置（已移至环境变量，留空的模板除外）
 config.local.ini
 .env
 .env.local
 *.secret
-broadcast/config.json  # 包含 SESSDATA（已清空但建议忽略）
+broadcast/config.json
 
-# ===== 调试和测试输出 =====
+# ===== 测试和调试 =====
+test/
 test_output/
 *.pcmm
 *.mp3
-test_cloud_tts*.py
-test_tts_debug*.py
-test_vision.py
-test_auto_search.py
-test_structured_output.py
-test_dedup.py
-test_ws_debug.py
-test_tts_*.py
 
 # ===== 知识库和数据文件 =====
-knowledge_base/*.txt  # 本地知识库
+knowledge_base/*.txt
 screenshots/
 *.png
 *.jpg
 *.jpeg
-
-# ===== RAG 测试数据 =====
-RAG/test/retrieval_report_*.json
-RAG/test/retrieval_report_*.md
-RAG/test/chat_data_*.json
-RAG/test/generated_*.json
 
 # ===== 运行时生成文件 =====
 restart_and_monitor.py
@@ -75,10 +61,4 @@ danmu_config.py
 
 # ===== Live2D 临时文件 =====
 live2d/diag_params.py
-live2d/test_*.py
-live2d/vtuber_studio_info.py
 live2d/live2d_param_visualizer.py
-
-# ===== 浏览器插件临时文件 =====
-tool/browser_tool.py
-tool/test_browser_tool.py

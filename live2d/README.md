@@ -1,194 +1,115 @@
 # Live2D VTube Studio API Integration
 
 本文件夹包含与 VTube Studio API 交互的相关文件，用于实现 LLM_vtuber 项目中与 Live2D 虚拟主播的交互功能。
-文件结构：
-live2d_base_centrol.py：live2d控制代码
-通过切换状态来控制live2d模型的行为
-RequestHandler(BaseHTTPRequestHandler)获取请求并解析json，设置状态
 
-vtuber_studio_info.py：基于vtuber_studio原文档的所有python操作实现
-vtuberapi.md:vtuber_studio原文档
-## 文件夹内容
+## 文件结构
 
-### 1. `vtuber_studio_info.py`
+| 文件 | 职责 |
+|------|------|
+| `live2d_main.py` | **核心控制**：idle_movement 常态循环、set_expression 表情注入、update_non_moving_state 目光移动、dump_vts_current_params 诊断快照 |
+| `vtuber_studio_info.py` | **VTS API 封装**：VTubeStudioAPI 类，提供 WebSocket 连接、认证、所有 API 方法的异步实现 |
+| `live2d_controller_manager.py` | **连接管理**：WebSocket 连接建立、重连、命令调度 |
+| `live2d_base_centrol.py` | 旧版状态机控制（已弃用，保留参考） |
 
-这是一个 Python 模块，实现了与 VTube Studio API 交互的核心功能。它包含 `VTubeStudioAPI` 类，提供了完整的 API 客户端实现，包括：
+## 核心工作原理
 
-- **连接管理**：连接到 VTube Studio 服务器并处理断开连接
-- **认证系统**：请求和管理 API 认证令牌
-- **服务器发现**：通过 UDP 广播自动发现 VTube Studio 服务器
-- **API 请求**：发送各种 API 请求并处理响应
-- **模型控制**：获取、加载和移动模型
-- **热键控制**：获取和触发热键
-- **表情控制**：获取和激活/停用表情
-- **统计信息**：获取 VTS 统计数据和文件夹信息
+### 高频参数注入
 
-#### 主要类和方法
+VTube Studio 摄像头追踪以 ~20Hz 覆盖参数。我们需要**更高频地注入**（每 0.3s tick 一次），且必须设置 `faceFound=True` 让 VTS 接受我们的值。
+
+```
+VTS 内部参数更新源：
+┌────────────────────────────────┐
+│ 摄像头追踪  (默认 ~20Hz)       │
+│  ↓ 覆盖                        │
+│ VTS 最终参数值                 │
+│  ↑ 我们注入  (≥ 3.3Hz)        │
+│  faceFound=True, mode="set"   │
+└────────────────────────────────┘
+```
+
+### 参数名称的两个世界（重要）
+
+| API | 返回参数名 | 用途 |
+|------|------|------|
+| `InputParameterListRequest` | `FaceAngleX`, `MouthOpen`, `EyeOpenLeft` ... | **我们用这个**：人类可读 |
+| `Live2DParameterListRequest` | `Param158`, `Param159` ... | 不要用：模型内部占位名 |
+
+## VTubeStudioAPI 主要方法
 
 ```python
 class VTubeStudioAPI:
-    # 连接和认证方法
+    # 连接与认证
     async def connect()
     async def disconnect()
-    async def request_auth_token(plugin_name, plugin_developer)
-    async def authenticate(plugin_name=None, plugin_developer=None)
-    def set_auth_token(token, plugin_name, plugin_developer)
+    async def authenticate()
     
-    # 服务器发现
-    @staticmethod
-    async def discover_servers(timeout=3.0)
+    # 参数控制
+    async def inject_parameter_data(params, face_found=True, mode="set")
+    async def get_tracking_parameters()    # InputParameterListRequest
+    async def get_live2d_parameters()       # Live2DParameterListRequest
     
-    # 模型相关
-    async def get_available_models()
+    # 表情与热键
+    async def trigger_hotkey(hotkey_id)
+    async def activate_expression(expression_file, active, fade_time)
+    async def get_expression_state()
+    async def get_hotkeys_in_model()
+    
+    # 模型
     async def get_current_model()
     async def load_model(model_id)
-    async def move_model(time_in_seconds, values_are_relative_to_model, ...)
+    async def move_model(time_in_seconds, ...)
     
-    # 热键相关
-    async def get_hotkeys()
-    async def trigger_hotkey(hotkey_id, item_instance_id=None)
-    
-    # 表情相关
-    async def get_expression_state(details=True, expression_file=None)
-    async def activate_expression(expression_file, active, fade_time=0.25)
-    
-    # 其他功能
-    async def get_statistics()
-    async def get_vts_folders()
-    async def get_face_tracking_data()
-    # ... 更多方法
+    # 道具
+    async def item_load_request(...)
+    async def item_animation_control_request(...)
 ```
-
-### 2. `vtuberapi.md`
-
-这是 VTube Studio API 的官方文档，详细介绍了 API 的使用方法、请求格式、响应格式和各种功能。文档内容包括：
-
-- API 概述和基本信息
-- 认证流程
-- 事件订阅
-- 模型管理
-- 热键控制
-- 表情控制
-- 参数控制
-- 物品管理
-- 等等...
-
-这是开发和使用 VTube Studio API 的重要参考资料。
-
-## 代码结构
-
-### `VTubeStudioAPI` 类的核心组件
-
-1. **连接层**
-   - 使用 WebSocket 与 VTube Studio 服务器通信
-   - 处理连接建立、断开和重连
-
-2. **认证层**
-   - 请求和管理认证令牌
-   - 处理会话认证
-   - 支持令牌持久化（通过 `set_auth_token` 方法）
-
-3. **请求层**
-   - 构建和发送 API 请求
-   - 处理响应和错误
-   - 支持异步操作
-
-4. **功能层**
-   - 模型管理功能
-   - 热键和表情控制
-   - 参数和统计信息获取
-   - 事件处理（可扩展）
 
 ## 使用示例
 
-以下是使用 `VTubeStudioAPI` 类的基本示例：
-
 ```python
 import asyncio
-from vtuber_studio_info import VTubeStudioAPI
+from live2d.live2d_main import Live2DMain
 
 async def main():
-    # 创建 API 客户端
-    api = VTubeStudioAPI()
+    live2d = Live2DMain(host="localhost", port=8001)
+    await live2d.connect()
     
-    try:
-        # 连接到服务器
-        await api.connect()
-        
-        # 请求认证令牌
-        await api.request_auth_token("MyLLMPlugin", "LLM_vtuber")
-        
-        # 等待用户在 VTS 界面授权
-        input("请在 VTube Studio 中授权插件，然后按 Enter 继续...")
-        
-        # 进行会话认证
-        await api.authenticate()
-        
-        # 获取当前加载的模型
-        model_info = await api.get_current_model()
-        print(f"当前模型: {model_info['data']['modelName']}")
-        
-        # 移动模型
-        await api.move_model(0.5, False, position_x=0.1, position_y=-0.1)
-        
-        # 获取热键列表
-        hotkeys = await api.get_hotkeys()
-        print(f"可用热键数: {len(hotkeys['data']['availableHotkeys'])}")
-        
-    finally:
-        # 断开连接
-        await api.disconnect()
+    # 启动常态循环（呼吸 + 漂移）
+    await live2d.start_idle()
+    
+    # 设置目光方向
+    await live2d.set_direction("left")
+    
+    # 注入表情
+    await live2d.set_expression("smile")
+    
+    await live2d.disconnect()
 
-# 运行主函数
 asyncio.run(main())
 ```
 
 ## 依赖项
 
-- `asyncio`: Python 异步编程库
-- `websockets`: WebSocket 客户端库
-- `json`: JSON 数据处理（Python 标准库）
-- `uuid`: 生成唯一标识符（Python 标准库）
-- `socket`: 网络通信（Python 标准库）
-- `struct`: 二进制数据处理（Python 标准库）
-
-## 安装依赖
-
-```bash
-pip install websockets
-```
+- `asyncio`: Python 异步编程
+- `websockets`: WebSocket 客户端
+- `json`: JSON 数据处理（标准库）
+- `uuid`: 生成唯一标识符（标准库）
 
 ## 参考文档
 
+- [live2d_design.md](../docs/live2d_design.md) - Live2D 详细设计文档
+- [live2d_optimization.md](../docs/live2d_optimization.md) - Live2D 优化方向与架构设计
 - [VTube Studio API 官方文档](https://github.com/DenchiSoft/VTubeStudio/blob/master/VTubeStudioPublicAPI.md)
-- [VTube Studio 插件开发指南](https://github.com/DenchiSoft/VTubeStudio/wiki/Plugins)
 
 ## 注意事项
 
-1. 使用前需要在 VTube Studio 中启用 API 访问（设置 -> 插件 API -> 允许插件 API 访问）
-2. 首次使用需要在 VTube Studio 界面授权插件访问
-3. 支持的 VTube Studio 版本：1.9.0 及以上
-4. 所有 API 调用都是异步的，需要在异步函数中使用
-
-## 扩展功能
-
-`VTubeStudioAPI` 类设计为可扩展的，用户可以通过继承该类并重写或添加方法来扩展功能，例如：
-
-```python
-class MyExtendedAPI(VTubeStudioAPI):
-    async def custom_event_handler(self):
-        # 实现自定义事件处理逻辑
-        pass
-    
-    async def my_custom_function(self):
-        # 实现自定义功能
-        pass
-```
+1. VTS 需启用 API 访问（设置 → 插件 API → 允许）
+2. 首次使用需在 VTS 界面授权插件
+3. 模型加载有 3-5 秒延迟，启动后等待再发指令
+4. 所有 WebSocket 操作必须持 `asyncio.Lock`（`operation_lock`）
+5. 注入频率必须 ≥ 每 0.5s 一次，否则会被摄像头追踪抢回
 
 ## 许可证
 
-本代码基于 VTube Studio API 开发，遵循 MIT 许可证。
-
----
-
-如需了解更多关于 VTube Studio API 的详细信息，请参考 `vtuberapi.md` 文件或官方文档。
+基于 VTube Studio API 开发，遵循 MIT 许可证。
