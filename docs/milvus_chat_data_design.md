@@ -1,4 +1,4 @@
-# 基于Milvus的虚拟AI聊天记录存储结构设计
+﻿# 基于Milvus的虚拟AI聊天记录存储结构设计
 
 ## 1. 系统概述
 
@@ -340,7 +340,7 @@ from pymilvus import MilvusClient
 
 client = MilvusClient(
     uri="http://localhost:19530",
-    token="root:Milvus",
+    token=os.environ.get("MILVUS_TOKEN", "")  # 留空则无认证,
     db_name="LLM_vtuber"
 )
 
@@ -615,7 +615,7 @@ from pymilvus import MilvusClient, DataType, IndexParams
 # 初始化客户端
 client = MilvusClient(
     uri="http://localhost:19530",
-    token="root:Milvus",
+    token=os.environ.get("MILVUS_TOKEN", "")  # 留空则无认证,
     db_name="LLM_vtuber"
 )
 
@@ -853,3 +853,4 @@ search_similar_messages("你好，今天过得怎么样？")
 5. **个性化推荐**：基于用户画像和聊天历史的个性化内容推荐
 
 通过本设计方案，可以构建一个功能强大、性能优异的虚拟AI聊天记录存储系统，为虚拟AI角色的智能交互提供坚实的技术基础。
+
