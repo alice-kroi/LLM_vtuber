@@ -62,3 +62,38 @@ danmu_config.py
 # ===== Live2D 临时文件 =====
 live2d/diag_params.py
 live2d/live2d_param_visualizer.py
+
+# ===== 运行时/本地诊断文件 =====
+@AutomationLog.txt
+_test_evolving.py
+learning_data.db
+*_run*.log
+_main_run*.log
+logs/
+
+# ===== 模型/资源（体积大，不应上传） =====
+*.bin
+*.ckpt
+*.safetensors
+*.pt
+*.pth
+*.onnx
+
+# ===== 本地临时测试脚本 =====
+tool/_*.py
+_tmp/
+tmp/
+*.bat.tmp
+
+# ===== 前端构建产物 =====
+node_modules/
+dist/
+.vite/
+
+# ===== 文档临时备份 =====
+*.backup
+*~
+
+# ===== Playwright/浏览器下载缓存 =====
+ms-playwright/
+.test-results/

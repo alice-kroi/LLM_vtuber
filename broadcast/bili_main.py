@@ -27,6 +27,37 @@ import blivedm.models.web as web_models
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config.json')
 
 # 从config.json读取配置
+def _resolve_sessdata(config_sessdata: str) -> str:
+    """
+    多来源解析 SESSDATA（优先级：config.json > 环境变量 > config.ini）
+
+    环境变量支持：BILIBILI_SESSDATA / SESSDATA
+    """
+    if config_sessdata:
+        return config_sessdata
+    for var in ("bilibli_SESSDATA", "BILIBILI_SESSDATA", "SESSDATA"):
+        env_val = os.getenv(var, "").strip()
+        if env_val:
+            logging.info(f"使用环境变量 {var} 提供的 SESSDATA")
+            return env_val
+    # 从 config.ini 兜底
+    try:
+        import configparser
+        cfg_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.ini"
+        )
+        ini = configparser.ConfigParser()
+        ini.read(cfg_path, encoding="utf-8")
+        if ini.has_section("bilibili"):
+            ini_val = ini.get("bilibili", "sessdata", fallback="").strip()
+            if ini_val:
+                logging.info("使用 config.ini 提供的 SESSDATA")
+                return ini_val
+    except Exception as e:
+        logging.debug(f"读取 config.ini SESSDATA 失败: {e}")
+    return ""
+
+
 def _load_config() -> Dict[str, Any]:
     try:
         with open(_CONFIG_PATH, 'r', encoding='utf-8') as f:
@@ -36,9 +67,14 @@ def _load_config() -> Dict[str, Any]:
             room_ids = [int(str(x).strip()) for x in room_ids_raw if str(x).strip()]
         else:
             room_ids = [int(x.strip()) for x in str(room_ids_raw).split(',') if x.strip()]
+        sessdata = _resolve_sessdata(str(cfg.get('SESSDATA', '') or '').strip())
+        if sessdata:
+            logging.info(f"SESSDATA 已就绪（len={len(sessdata)}）")
+        else:
+            logging.warning("SESSDATA 未配置，匿名模式（B站可能屏蔽弹幕与昵称）")
         return {
             'ROOM_IDS': room_ids,
-            'SESSDATA': cfg.get('SESSDATA', ''),
+            'SESSDATA': sessdata,
             'OUTPUT_PORT': int(cfg.get('output_port', 8081)),
         }
     except Exception as e:

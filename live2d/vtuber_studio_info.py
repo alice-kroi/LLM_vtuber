@@ -52,7 +52,8 @@ class VTubeStudioAPI:
         return False
     
     async def send_request(self, api_name="VTubeStudioPublicAPI", api_version="1.0", 
-                         request_id=None, message_type="APIStateRequest", data=None):
+                         request_id=None, message_type="APIStateRequest", data=None,
+                         timeout: float = 2.0):
         """发送API请求到VTube Studio服务器
         
         参数:
@@ -61,6 +62,7 @@ class VTubeStudioAPI:
             request_id (str, optional): 请求ID. 默认自动生成UUID.
             message_type (str, optional): 消息类型. 默认值 "APIStateRequest".
             data (dict, optional): 请求数据. 默认值 None.
+            timeout (float): 等待响应超时(秒). 参数注入建议 0.2, 快照等建议 2.0.
         
         返回:
             dict: 服务器响应的JSON数据
@@ -86,10 +88,16 @@ class VTubeStudioAPI:
             # 发送请求
             await self.websocket.send(json.dumps(request_data))
             
-            # 接收响应
-            response = await self.websocket.recv()
+            # 接收响应 (带超时, 防止 VTS 无响应时永远阻塞)
+            response = await asyncio.wait_for(
+                self.websocket.recv(),
+                timeout=timeout,
+            )
             return json.loads(response)
         
+        except asyncio.TimeoutError:
+            print(f"VTS API请求超时 (>{timeout}s): {message_type}")
+            return None
         except websockets.ConnectionClosed:
             print("连接已关闭，无法发送请求")
             return None

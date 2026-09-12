@@ -428,8 +428,13 @@ class Live2DMain:
 
     async def move(self, target_params: dict, duration: float = 2.5, direction: str = "",
                    commit_params: dict | None = None) -> None:
-        """
-        从当前核心参数平滑移动到目标参数。
+        """从当前核心参数平滑移动到目标参数（带锁入口）。"""
+        async with self.operation_lock:
+            await self._move_impl(target_params, duration, direction, commit_params)
+
+    async def _move_impl(self, target_params: dict, duration: float = 2.5,
+                         direction: str = "", commit_params: dict | None = None) -> None:
+        """move 的核心实现。调用者必须已持有 operation_lock。
 
         关键改进（v6, 解决起步冲量+忽快忽慢）:
           1. 缓动: 0.3*ease_out_cubic + 0.7*linear。
@@ -465,91 +470,90 @@ class Live2DMain:
         total_frames = int(duration * _MOVE_FPS) + 1  # 例如 3*50+1 = 151 帧
         blend_width = max(6, int(total_frames * 0.15))  # 首尾各 15% 做呼吸锚定渐变
 
-        async with self.operation_lock:
-            for frame_index in range(total_frames):
-                # 精确对齐帧时间（避免 time.perf_counter 抖动导致丢帧/重复帧）
-                target_tick = start_time + frame_index * _MOVE_STEP_SEC
-                # 本帧缓动进度 [0, 1]，最后一帧强制为 1.0（确保精准落位）
-                if frame_index == total_frames - 1:
-                    progress_raw = 1.0
-                else:
-                    # 用 time.perf_counter() 的真实位置计算，但钳制到 [0, 1]
-                    now = time.perf_counter()
-                    progress_raw = max(0.0, min(1.0, (now - start_time) / duration))
-
-                # 混合缓动: 30% ease_out_cubic + 70% linear
-                # v6: 降低 cubic 占比(0.6→0.3)，起步斜率从 2.2x 降到 1.6x，
-                # 减少起步冲量；中段 90% 近似匀速，消除忽快忽慢
-                def _blend_ease(t: float) -> float:
-                    if t <= 0.0: return 0.0
-                    if t >= 1.0: return 1.0
-                    # ease_out_cubic: 1 - (1-t)^3
-                    cubic = 1.0 - (1.0 - t) ** 3
-                    return 0.3 * cubic + 0.7 * t
-                progress = _blend_ease(progress_raw)
-
-                # --- 呼吸偏移锚定 ---
-                breath_move = self._breath_param_dict(time.time() - self.start_time)
-                irr = self._irregular_param_dict(progress_raw * duration)
-
-                # blend α: 0=完全用idle锚定呼吸(衔接段), 1=完全用move自身呼吸
-                if frame_index < blend_width:
-                    # 开头 blend_width 帧: α 从 0 → 1 (从前段 idle 呼吸平滑切入)
-                    alpha = frame_index / blend_width
-                elif frame_index >= total_frames - blend_width:
-                    # 结尾 blend_width 帧: α 从 1 → 0 (平滑切回后段 idle 呼吸)
-                    alpha = (total_frames - 1 - frame_index) / blend_width
-                else:
-                    alpha = 1.0
-
-                # 线性插值: 首尾两端分别锚定到 idle_breath_start / idle_breath_end
-                # 起点侧: (1-α)*idle_breath_start + α*breath_move
-                # 终点侧: 同步向 idle_breath_end 靠拢
-                t_rel_end = progress_raw  # 0→1
-                t_rel_start = 1.0 - progress_raw
-
-                items: list[tuple[str, float]] = []
-                for pname in target_params:
-                    base = start_params[pname] + deltas[pname] * progress
-                    bm = breath_move.get(pname, 0.0)
-                    bs = idle_breath_start.get(pname, 0.0)
-                    be = idle_breath_end.get(pname, 0.0)
-                    # v6: move 中段呼吸衰减到 40%，避免呼吸角速度(10.8°/s)
-                    # 干扰缓动方向(6.8°/s)导致忽快忽慢；首尾保持 100% 与 idle 衔接
-                    move_breath = bm * _MOVE_BREATH_ATTENUATION
-                    blended_breath = (
-                        (1 - alpha) * (t_rel_start * bs + t_rel_end * be)
-                        + alpha * move_breath
-                    )
-                    # 微抖动仅在中段 α≈1 时生效，首尾衔接时抑制
-                    # v6: 中段额外衰减到 20%，角速度从 22.7→4.5°/s，不再干扰缓动方向
-                    blended_irr = irr.get(pname, 0.0) * alpha * _MOVE_IRR_ATTENUATION
-                    total = base + blended_breath + blended_irr
-                    items.append((pname, total))
-
-                # 最后一帧: source 标记为 move_final（保持CSV兼容性）
-                if frame_index == total_frames - 1:
-                    src = f"move_final:{src_label}"
-                else:
-                    src = f"move:{src_label}"
-                await self._inject_params(items, source=src)
-
-                # 精确睡到下一帧
-                sleep_s = target_tick - time.perf_counter()
-                if sleep_s > 0:
-                    await asyncio.sleep(sleep_s)
-                else:
-                    await asyncio.sleep(0)
-
-            # 到达终点：更新核心参数
-            # 若指定了 commit_params（同方向微调场景），则用模板值回退，避免微调累积"越来越歪"；
-            # 否则用 target_params（跨方向场景）。
-            if commit_params is not None:
-                for pname, v in commit_params.items():
-                    self.core_params[pname] = v
+        for frame_index in range(total_frames):
+            # 精确对齐帧时间（避免 time.perf_counter 抖动导致丢帧/重复帧）
+            target_tick = start_time + frame_index * _MOVE_STEP_SEC
+            # 本帧缓动进度 [0, 1]，最后一帧强制为 1.0（确保精准落位）
+            if frame_index == total_frames - 1:
+                progress_raw = 1.0
             else:
-                for pname, v in target_params.items():
-                    self.core_params[pname] = v
+                # 用 time.perf_counter() 的真实位置计算，但钳制到 [0, 1]
+                now = time.perf_counter()
+                progress_raw = max(0.0, min(1.0, (now - start_time) / duration))
+
+            # 混合缓动: 30% ease_out_cubic + 70% linear
+            # v6: 降低 cubic 占比(0.6→0.3)，起步斜率从 2.2x 降到 1.6x，
+            # 减少起步冲量；中段 90% 近似匀速，消除忽快忽慢
+            def _blend_ease(t: float) -> float:
+                if t <= 0.0: return 0.0
+                if t >= 1.0: return 1.0
+                # ease_out_cubic: 1 - (1-t)^3
+                cubic = 1.0 - (1.0 - t) ** 3
+                return 0.3 * cubic + 0.7 * t
+            progress = _blend_ease(progress_raw)
+
+            # --- 呼吸偏移锚定 ---
+            breath_move = self._breath_param_dict(time.time() - self.start_time)
+            irr = self._irregular_param_dict(progress_raw * duration)
+
+            # blend α: 0=完全用idle锚定呼吸(衔接段), 1=完全用move自身呼吸
+            if frame_index < blend_width:
+                # 开头 blend_width 帧: α 从 0 → 1 (从前段 idle 呼吸平滑切入)
+                alpha = frame_index / blend_width
+            elif frame_index >= total_frames - blend_width:
+                # 结尾 blend_width 帧: α 从 1 → 0 (平滑切回后段 idle 呼吸)
+                alpha = (total_frames - 1 - frame_index) / blend_width
+            else:
+                alpha = 1.0
+
+            # 线性插值: 首尾两端分别锚定到 idle_breath_start / idle_breath_end
+            # 起点侧: (1-α)*idle_breath_start + α*breath_move
+            # 终点侧: 同步向 idle_breath_end 靠拢
+            t_rel_end = progress_raw  # 0→1
+            t_rel_start = 1.0 - progress_raw
+
+            items: list[tuple[str, float]] = []
+            for pname in target_params:
+                base = start_params[pname] + deltas[pname] * progress
+                bm = breath_move.get(pname, 0.0)
+                bs = idle_breath_start.get(pname, 0.0)
+                be = idle_breath_end.get(pname, 0.0)
+                # v6: move 中段呼吸衰减到 40%，避免呼吸角速度(10.8°/s)
+                # 干扰缓动方向(6.8°/s)导致忽快忽慢；首尾保持 100% 与 idle 衔接
+                move_breath = bm * _MOVE_BREATH_ATTENUATION
+                blended_breath = (
+                    (1 - alpha) * (t_rel_start * bs + t_rel_end * be)
+                    + alpha * move_breath
+                )
+                # 微抖动仅在中段 α≈1 时生效，首尾衔接时抑制
+                # v6: 中段额外衰减到 20%，角速度从 22.7→4.5°/s，不再干扰缓动方向
+                blended_irr = irr.get(pname, 0.0) * alpha * _MOVE_IRR_ATTENUATION
+                total = base + blended_breath + blended_irr
+                items.append((pname, total))
+
+            # 最后一帧: source 标记为 move_final（保持CSV兼容性）
+            if frame_index == total_frames - 1:
+                src = f"move_final:{src_label}"
+            else:
+                src = f"move:{src_label}"
+            await self._inject_params(items, source=src)
+
+            # 精确睡到下一帧
+            sleep_s = target_tick - time.perf_counter()
+            if sleep_s > 0:
+                await asyncio.sleep(sleep_s)
+            else:
+                await asyncio.sleep(0)
+
+        # 到达终点：更新核心参数
+        # 若指定了 commit_params（同方向微调场景），则用模板值回退，避免微调累积"越来越歪"；
+        # 否则用 target_params（跨方向场景）。
+        if commit_params is not None:
+            for pname, v in commit_params.items():
+                self.core_params[pname] = v
+        else:
+            for pname, v in target_params.items():
+                self.core_params[pname] = v
 
         logger.debug(f"移动完成，耗时 {duration:.2f}s，发送 {total_frames} 帧")
 
@@ -675,6 +679,31 @@ class Live2DMain:
             low = pname.lower()
             if "mouth" in low or "嘴" in pname:
                 self._cached_mouth_param = pname
+                return pname
+        return None
+
+    def _resolve_eye_param(self, eye_side: str) -> str | None:
+        """查找眼睛开合参数名。eye_side: 'EyeOpenLeft' | 'EyeOpenRight'。"""
+        # 通用 → 实际参数名映射 (匹配 EXPRESSION_PARAM_MAP 中的别名列表)
+        alias_map = {
+            "EyeOpenLeft": ["EyeOpenLeft", "ParamEyeBallX", "eye_open_l", "EyeL"],
+            "EyeOpenRight": ["EyeOpenRight", "ParamEyeBallY", "eye_open_r", "EyeR"],
+        }
+        aliases = alias_map.get(eye_side, [eye_side])
+        for alias in aliases:
+            if alias in self.param_ranges:
+                return alias
+        # 模糊搜索: 参数名包含 "eye" + (left/right)
+        for pname in self.param_ranges.keys():
+            low = pname.lower()
+            if "eye" not in low or "open" not in low:
+                continue
+            side_key = eye_side.lower().replace("eyeopen", "")
+            if side_key in low:
+                return pname
+        # 最后: 包含 "eye" 的第一个
+        for pname in self.param_ranges.keys():
+            if "eye" in pname.lower():
                 return pname
         return None
 
@@ -880,6 +909,7 @@ class Live2DMain:
                 api_name="VTubeStudioPublicAPI",
                 message_type="InjectParameterDataRequest",
                 data=data,
+                timeout=0.2,  # 参数注入高频调用, 200ms 超时足够
             )
         except Exception as e:
             logger.error(f"注入参数数据失败: {e}")
@@ -1116,23 +1146,126 @@ class Live2DMain:
     # ------------------------------------------------------------------
 
     async def idle_movement(self) -> None:
-        """空闲呼吸循环：每 tick 持锁下发 core_params + 呼吸。"""
+        """空闲呼吸循环：每 tick 持锁下发 core_params + 呼吸 + 眨眼/mini-move 调度。
+
+        优化项:
+        1. 周期性 mini-move: 每 10-18s 随机偏移方向 ±5-12°, 避免永远 center
+        2. 眨眼调度: 每 4-8s 眨一次眼 (闭眼 150ms, 过渡平滑)
+        3. 表情微变: 偶尔切 smile/neutral, 增加生命感
+        """
         _tick_count = 0
         _start_time = time.time()
+        _last_mini_move = _start_time
+        _next_mini_move_in = random.uniform(10.0, 18.0)
+        _last_blink = _start_time
+        _next_blink_in = random.uniform(4.0, 8.0)
         logger.info(f"[idle] 常态循环已启动，param_ranges={len(self.param_ranges)} params")
         while self.running:
             try:
                 async with self.operation_lock:
                     now = time.time()
+                    elapsed = now - _start_time
+
+                    # === 眨眼调度 ===
+                    if now - _last_blink > _next_blink_in:
+                        blink_result = await self._blink_once(now)
+                        if blink_result:
+                            _last_blink = now
+                            _next_blink_in = random.uniform(4.0, 8.0)
+
+                    # === 周期性 mini-move ===
+                    if now - _last_mini_move > _next_mini_move_in:
+                        await self._idle_mini_move(now)
+                        _last_mini_move = now
+                        _next_mini_move_in = random.uniform(10.0, 18.0)
+
+                    # 常规呼吸注入
                     await self.update_non_moving_state(now)
-                    # 每 200 tick (~60s) 请求一次 VTS 实际参数快照
-                    if _tick_count % 200 == 0:
+                    # 每 250 tick (~5s) 打个心跳日志
+                    if _tick_count % 250 == 0 and _tick_count > 0:
+                        logger.info(f"[idle] tick={_tick_count} blink_in={_next_blink_in:.1f}s mini_in={_next_mini_move_in:.1f}s")
+                    # 每 1000 tick (~20s) 请求一次 VTS 快照
+                    if _tick_count % 1000 == 0 and _tick_count > 0:
                         await self.dump_vts_current_params(label=f"tick={_tick_count}")
                 _tick_count += 1
                 await asyncio.sleep(_MOVE_STEP_SEC)
             except Exception as e:
                 logger.error(f"[idle] 执行常态运动失败: {e}")
                 await asyncio.sleep(1.0)
+
+    async def _blink_once(self, now: float) -> bool:
+        """快速眨一次眼: EyeOpen → 0 → 恢复。持锁调用。"""
+        left_param = self._resolve_eye_param("EyeOpenLeft")
+        right_param = self._resolve_eye_param("EyeOpenRight")
+        if not left_param and not right_param:
+            logger.debug("[blink] 未找到眼睛参数, 跳过眨眼")
+            return False
+
+        eye_params = []
+        if left_param:
+            eye_params.append(left_param)
+        if right_param:
+            eye_params.append(right_param)
+
+        logger.info(f"[blink] 眨眼触发, eye_params={eye_params}")
+
+        # 查默认值 (通常 EyeOpen 默认值是 1.0 = 全睁)
+        defaults = {}
+        for p in eye_params:
+            pr = self.param_ranges.get(p, {})
+            defaults[p] = pr.get("default", 1.0)
+
+        # 闭眼
+        close_items = [(p, 0.0) for p in eye_params]
+        await self._inject_params(close_items, source="blink:close")
+
+        # 过渡动画: 0 → 睁开 (150ms 分 3 帧)
+        frames = 3
+        frame_dur = 0.05
+        for i in range(1, frames + 1):
+            await asyncio.sleep(frame_dur)
+            progress = i / frames
+            open_items = [(p, progress * defaults[p]) for p in eye_params]
+            await self._inject_params(open_items, source=f"blink:open:{i}")
+
+        # 同步到 core_params
+        for p in eye_params:
+            self.core_params[p] = defaults[p]
+
+        return True
+
+    async def _idle_mini_move(self, now: float) -> None:
+        """idle 期间的小幅度方向偏移, 避免永远只在 center 呼吸。持锁调用。
+
+        与 move_to_direction 的区别:
+        - 只走 center 附近 (从 center 随机偏移 ±5-12°)
+        - 幅度小, 速度慢, 不引起明显方向跳变
+        - 完成后 commit 回 center (下次 mini-move 有统一起点)
+        """
+        # 选一个非 center 的方向做模板, 然后叠加小随机偏移
+        pool = [d for d in VALID_DIRECTIONS if d != "center"]
+        direction = random.choice(pool)
+        base = dict(DIRECTION_TEMPLATES[direction])
+
+        logger.info(f"[mini-move] 触发 → direction={direction}, pool={pool}")
+
+        # mini-move: 把方向模板缩小到 30-60%
+        scale = random.uniform(0.30, 0.60)
+        target = {}
+        for pname, val in base.items():
+            target[pname] = val * scale + random.uniform(-2.0, 2.0)
+
+        # 同步 core_params 到当前值作为起点
+        for pname in target:
+            if pname not in self.core_params:
+                pr = self.param_ranges.get(pname, {})
+                self.core_params[pname] = pr.get("default", 0.0)
+
+        # 缓动到目标 (慢速 2.5-4s) —— 已在 idle 的 operation_lock 内，用 _move_impl 避免自死锁
+        duration = random.uniform(2.5, 4.0)
+        await self._move_impl(target, duration, direction=f"mini:{direction}",
+                              commit_params=dict(DIRECTION_TEMPLATES["center"]))
+        self.current_direction = "center"
 
     async def add_command(self, command: dict) -> None:
         await self.command_queue.put(command)

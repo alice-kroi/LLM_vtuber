@@ -233,6 +233,141 @@ def _call_chat_api_with_retry(state: ChatState, api_key: str, base_url: str,
     raise last_exc if last_exc else RuntimeError("未知错误")
 
 
+# --------- P0：流式生成（首字优先） ---------
+def chat_stream(state: ChatState, on_token=None, on_first_token=None,
+                api_key: str = None, base_url: str = None,
+                tools: list = None, json_schema: dict = None) -> dict:
+    """
+    流式聊天生成（P0：首字优先，降低用户感知延迟）。
+
+    - 与 `_call_chat_api_with_retry` 结果结构一致：返回 {"response","tokens_used","tool_calls"}
+    - 通过 `stream=True` 逐 chunk 累积完整文本（保证非流式路径语义不变）
+    - 可选回调：on_token(chunk_text) 每片调用；on_first_token(text) 首个内容到达时调用
+      （供调用方立即推送到 WebSocket，实现"首字快、尾部长"）
+    - 可选 json_schema：启用豆包严格结构化输出（response_format=json_schema+strict），
+      返回 dict 字段导航更稳定（P1 结构化输出）
+    - 失败时抛异常由调用方降级
+
+    Args:
+        state: ChatState
+        on_token: 可选，接收每个增量文本片段
+        on_first_token: 可选，首个文本片段到达时触发（用于首字推送）
+        api_key/base_url: 覆盖环境变量
+        tools: 可选，OpenAI function calling 格式工具
+        json_schema: 可选，json_schema 严格输出（格式 {"type":"object","properties":...}）
+
+    Returns:
+        {"response": str, "tokens_used": int, "tool_calls": list|None, "structured": dict|None}
+    """
+    _api_key = api_key or state.get("api_key") or os.getenv("Doubao_API_KEY") or os.getenv("DOUBAO_API_KEY")
+    _base_url = base_url or state.get("api_url") or os.getenv("Doubao_API_URL")
+    if not _api_key or not _base_url:
+        raise ValueError("未配置豆包 API（Doubao_API_KEY / Doubao_API_URL）")
+
+    client = OpenAI(api_key=_api_key, base_url=_base_url,
+                    timeout=(API_CONNECT_TIMEOUT, API_READ_TIMEOUT), max_retries=0)
+    openai_messages = _build_openai_messages(state)
+
+    kwargs = {
+        "model": state["model"],
+        "messages": openai_messages,
+        "temperature": state["temperature"],
+        "max_tokens": state["max_tokens"],
+        "top_p": state.get("top_p", 1.0),
+        "frequency_penalty": state.get("frequency_penalty", 0.0),
+        "presence_penalty": state.get("presence_penalty", 0.0),
+        "stream": True,
+    }
+    if tools:
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "auto"
+    if json_schema:
+        kwargs["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "structured_reply", "schema": json_schema, "strict": True},
+        }
+
+    parts = []
+    reasoning_parts = []
+    first_emitted = False
+    tool_calls_buffer = {}  # index -> {id,name,arguments(str)}
+    tool_calls = None
+
+    for chunk in client.chat.completions.create(**kwargs):
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        # 内容流
+        if hasattr(delta, "content") and delta.content:
+            parts.append(delta.content)
+            if on_token is not None:
+                on_token(delta.content)
+            if not first_emitted and on_first_token is not None:
+                try:
+                    on_first_token(delta.content)
+                except Exception as e:
+                    logger.debug(f"[流式] on_first_token 回调异常: {e}")
+                first_emitted = True
+        # 思考流（reasoning）仅记录不输出
+        if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+            reasoning_parts.append(delta.reasoning_content)
+        # 工具调用流
+        if hasattr(delta, "tool_calls") and delta.tool_calls:
+            tool_calls = tool_calls or []
+            for tc in delta.tool_calls:
+                idx = tc.index if hasattr(tc, "index") else 0
+                if idx not in tool_calls_buffer:
+                    tool_calls_buffer[idx] = {
+                        "tool_call_id": tc.id or "",
+                        "name": tc.function.name if tc.function else "",
+                        "arguments": tc.function.arguments if tc.function else "",
+                    }
+                else:
+                    buf = tool_calls_buffer[idx]
+                    if tc.id:
+                        buf["tool_call_id"] = tc.id
+                    if tc.function and tc.function.name:
+                        buf["name"] = tc.function.name
+                    if tc.function and tc.function.arguments:
+                        buf["arguments"] += tc.function.arguments
+            tool_calls = [tool_calls_buffer[i] for i in sorted(tool_calls_buffer)]
+
+    response = "".join(parts)
+    # 若只有思考无内容（给出空），保持与旧逻辑一致地丢弃思考
+    if not response:
+        response = ""
+        if reasoning_parts:
+            logger.debug(f"[流式] 仅 reason（{len(''.join(reasoning_parts))}字），不作为正式回复")
+
+    # 规范化工具调用
+    normalized_tools = None
+    if tool_calls:
+        normalized_tools = []
+        for tc in tool_calls:
+            try:
+                args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+            except Exception:
+                args = {}
+            normalized_tools.append({
+                "tool_call_id": tc["tool_call_id"],
+                "name": tc["name"],
+                "arguments": args,
+            })
+
+    # P1 结构化输出：json_schema 模式下，把累积文本解析为结构化 dict
+    structured = None
+    if json_schema and response:
+        try:
+            structured = json.loads(response)
+            if not isinstance(structured, dict):
+                structured = None
+        except Exception:
+            structured = None
+
+    return {"response": response, "tokens_used": 0, "tool_calls": normalized_tools,
+            "structured": structured}
+
+
 # --------- 两个聊天节点（保留原有的返回结构约定） ---------
 def openai_chat_node(state: ChatState) -> ChatState:
     """OpenAI API聊天节点"""

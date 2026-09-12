@@ -166,6 +166,10 @@ class WebSocketManager:
     async def broadcast_ai_response(self, content: str, tone: str = "", visual_focus: str = "", mouth_state: str = ""):
         await self.broadcast("ai_response", {"content": content, "tone": tone, "visual_focus": visual_focus, "mouth_state": mouth_state}, "ai_response")
 
+    async def broadcast_ai_stream_start(self, content: str):
+        """首字流式：LLM 首个内容片段到达时推送（供前端做"正在输出"预览）"""
+        await self.broadcast("ai_stream_start", {"content": content}, "ai_response")
+
     async def broadcast_status_change(self, component: str, status: str, message: str = ""):
         await self.broadcast("status_change", {"component": component, "status": status, "message": message}, "system")
 

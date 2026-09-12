@@ -354,7 +354,75 @@ def calculator_tool(expression: str) -> Dict[str, Any]:
         }
 
 
+# ============ TTS 工具（S3：工具化 TTS，混合模式兜底） ============
+
+async def tts_synthesize(
+    text: str,
+    tone: str = "",
+    mode: str = "cloud",
+) -> Dict[str, Any]:
+    """
+    合成并播放语音（工具版 TTS）
+
+    当 LLM 需要主动控制说话时机时调用此工具（如朗读搜索结果、播报长文）。
+    默认使用云端 TTS（更稳定），可在流式环境自动降级本地。
+
+    Args:
+        text: 要合成的文本（内部会自动清理表情/特殊字符）
+        tone: 语气标签（影响本地参考音频选择，如 开心/撒娇/调皮）
+        mode: "cloud"（云端，默认）或 "local"（本地 GPT-SoVITS）
+
+    Returns:
+        {"success": bool, "duration": float, "error": str}
+    """
+    from audio.audio_main import (
+        cloud_tts_request_and_play,
+        tts_request_and_stream_play,
+        clean_text_for_tts,
+        get_cloud_tts_config,
+    )
+
+    cleaned = clean_text_for_tts(text)
+    if not cleaned:
+        return {"success": False, "error": "文本清洗后为空"}
+
+    effective_mode = mode
+    if mode == "cloud":
+        cfg = get_cloud_tts_config()
+        if cfg is None or not getattr(cfg, "enabled", False):
+            logger.warning("[TTS工具] 云端 TTS 未启用，自动降级本地")
+            effective_mode = "local"
+
+    if effective_mode == "cloud":
+        try:
+            result = await cloud_tts_request_and_play(cleaned, get_cloud_tts_config())
+            return {
+                "success": result.get("success", False),
+                "duration": result.get("audio_duration", 0.0),
+                "error": result.get("error"),
+            }
+        except Exception as e:
+            logger.error(f"[TTS工具] 云端合成失败，降级本地: {e}")
+            effective_mode = "local"
+
+    # 本地 TTS
+    try:
+        ref_audio = ""
+        if tone:
+            from audio.audio_main import find_ref_audio_by_tone
+            ref_audio = find_ref_audio_by_tone(tone)
+        result = await tts_request_and_stream_play(cleaned, "", ref_audio)
+        return {
+            "success": result.get("success", False),
+            "duration": result.get("audio_duration", 0.0),
+            "error": result.get("error"),
+        }
+    except Exception as e:
+        return {"success": False, "error": f"TTS工具执行失败: {e}"}
+
+
 # 注册示例工具
+tool_registry.register_tool("tts_synthesize", tts_synthesize)
 tool_registry.register_tool("example_tool", example_tool)
 tool_registry.register_tool("add_numbers", add_numbers)
 tool_registry.register_tool("play_audio", play_audio_tool)
@@ -377,6 +445,46 @@ try:
     logger.info("视觉分析工具已注册: vision_analyze, list_windows")
 except ImportError as e:
     logger.warning(f"视觉分析工具未注册（依赖未安装）: {e}")
+
+# 注册 Edge 交互浏览器工具（EdgeAgent —— 像 TRAE 浏览器 agent 一样操控 Edge）
+try:
+    from tool.edge_agent import (
+        browser_snapshot, browser_navigate, browser_click, browser_type,
+        browser_press_key, browser_scroll, browser_tabs,
+    )
+    tool_registry.register_tool("browser_snapshot", browser_snapshot)
+    tool_registry.register_tool("browser_navigate", browser_navigate)
+    tool_registry.register_tool("browser_click", browser_click)
+    tool_registry.register_tool("browser_type", browser_type)
+    tool_registry.register_tool("browser_press_key", browser_press_key)
+    tool_registry.register_tool("browser_scroll", browser_scroll)
+    tool_registry.register_tool("browser_tabs", browser_tabs)
+    logger.info("Edge 交互浏览器工具已注册: browser_snapshot/navigate/click/type/press_key/scroll/tabs")
+except ImportError as e:
+    logger.warning(f"Edge 交互浏览器工具未注册（依赖未安装）: {e}")
+
+# 注册 AI 操作电脑（Computer Use）工具（键盘/鼠标/窗口/视觉定位）
+try:
+    from tool.computer_use import (
+        os_list_windows, os_activate_window, os_click_xy, os_type_text,
+        os_press_key, os_scroll, ui_list_elements, vision_click,
+        os_open_path, os_list_directory, os_minimize_window, os_show_desktop,
+    )
+    tool_registry.register_tool("os_list_windows", os_list_windows)
+    tool_registry.register_tool("os_activate_window", os_activate_window)
+    tool_registry.register_tool("os_click_xy", os_click_xy)
+    tool_registry.register_tool("os_type_text", os_type_text)
+    tool_registry.register_tool("os_press_key", os_press_key)
+    tool_registry.register_tool("os_scroll", os_scroll)
+    tool_registry.register_tool("ui_list_elements", ui_list_elements)
+    tool_registry.register_tool("vision_click", vision_click)
+    tool_registry.register_tool("os_open_path", os_open_path)
+    tool_registry.register_tool("os_list_directory", os_list_directory)
+    tool_registry.register_tool("os_minimize_window", os_minimize_window)
+    tool_registry.register_tool("os_show_desktop", os_show_desktop)
+    logger.info("AI 操作电脑工具已注册: os_list_windows/activate_window/click_xy/type_text/press_key/scroll/ui_list_elements/vision_click/open_path/list_directory/minimize_window/show_desktop")
+except ImportError as e:
+    logger.warning(f"AI 操作电脑工具未注册（依赖未安装）: {e}")
 
 
 if __name__ == "__main__":

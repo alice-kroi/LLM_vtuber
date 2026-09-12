@@ -232,6 +232,16 @@
     background: #f3e5f5;
     border-left: 3px solid #7b1fa2;
   }
+  .message-item.ai_response.streaming {
+    background: #f4ecff;
+    opacity: 0.85;
+  }
+  .message-item .stream-caret {
+    color: #7b1fa2;
+    font-weight: bold;
+    animation: blink 1s steps(2, start) infinite;
+  }
+  @keyframes blink { to { visibility: hidden; } }
   .message-item.system {
     background: #eceff1;
     border-left: 3px solid #546e7a;
@@ -1037,6 +1047,69 @@ async function refreshStatus() {
 }
 
 // ============ 消息 ============
+// P0 首字流式：记录当前"正在流式输出"的 AI 回复 DOM，用于首字→完整 无缝替换
+let streamingReplyItem = null;
+
+function createAiMessageItem(msg, content, streaming) {
+  const stream = document.getElementById('messageStream') || document.createElement('div');
+  const item = document.createElement('div');
+  item.className = 'message-item ai_response' + (streaming ? ' streaming' : '');
+  const time = new Date((msg.timestamp || Date.now() / 1000) * 1000);
+  const timeStr = time.toLocaleTimeString('zh-CN', { hour12: false });
+  let meta = `<div class="message-meta">[${timeStr}]`;
+  if (msg.data && msg.data.tone) meta += ` <span class="message-tone">${msg.data.tone}</span>`;
+  meta += '</div>';
+  item.innerHTML = meta + `<div class="message-content">${content}</div>`;
+  if (streaming) item.querySelector('.message-content').innerHTML += '<span class="stream-caret">▍</span>';
+  return item;
+}
+
+function handleStreamStart(msg) {
+  // 首字到达：创建/追加一条"流式预览" AI 回复
+  const text = msg.data?.content || '';
+  const stream = document.getElementById('messageStream');
+  if (stream && stream.querySelector('.message-item') === null && stream.children.length === 1) {
+    stream.innerHTML = '';
+  }
+  // 复用同一流式节点：首字之后若有后续首字片段也追加
+  if (streamingReplyItem && stream.contains(streamingReplyItem)) {
+    const c = streamingReplyItem.querySelector('.message-content');
+    const caret = c.querySelector('.stream-caret');
+    if (caret) caret.remove();
+    c.textContent += text;
+    c.appendChild(document.createTextNode(''));
+    // 重新追加光标
+    const span = document.createElement('span'); span.className='stream-caret'; span.textContent='▍';
+    c.appendChild(span);
+  } else {
+    streamingReplyItem = createAiMessageItem(msg, text, true);
+    stream.appendChild(streamingReplyItem);
+  }
+  if (stream) stream.scrollTop = stream.scrollHeight;
+}
+
+function finalizeStreamingReply(msg) {
+  // 完整 ai_response 到达：若存在流式预览节点，就地替换为完整内容（避免出现两条）
+  if (streamingReplyItem && document.getElementById('messageStream') &&
+      document.getElementById('messageStream').contains(streamingReplyItem)) {
+    const content = msg.data?.content || '';
+    const c = streamingReplyItem.querySelector('.message-content');
+    if (c) {
+      c.innerHTML = content;  // 去掉光标，填完整内容
+    }
+    if (msg.data?.tone) {
+      const meta = streamingReplyItem.querySelector('.message-meta');
+      if (meta && !meta.textContent.includes('【')) {
+        meta.innerHTML += ` <span class="message-tone">${msg.data.tone}</span>`;
+      }
+    }
+    streamingReplyItem.classList.remove('streaming');
+    streamingReplyItem = null;
+    return true;
+  }
+  return false;
+}
+
 function addMessage(data, streamId = 'messageStream') {
   const stream = document.getElementById(streamId);
   if (!stream) return;
@@ -1264,7 +1337,25 @@ function handleWSMessage(msg) {
     }
 
     // 消息流
-    if (['danmaku', 'ai_response', 'vision'].includes(msg.type)) {
+    // P0：ai_stream_start（首字）→ 流式预览；ai_response（完整）→ 若是预览就地补全，否则新建
+    if (msg.type === 'ai_response' && msg.event === 'ai_stream_start') {
+      console.log('[WS] 首字流式:', msg.data?.content);
+      handleStreamStart(msg);
+      return;
+    }
+    if (msg.type === 'ai_response') {
+      const finalized = finalizeStreamingReply(msg);
+      console.log('[WS] 完整AI回复:', finalized ? '复用流式节点' : '新建', msg.data?.content);
+      if (!finalized) {
+        addMessage(msg, 'messageStream');
+        if (document.getElementById('page-messages').classList.contains('active')) {
+          addMessage(msg, 'messageHistoryStream');
+        }
+      } else {
+        const stream = document.getElementById('messageStream');
+        if (stream) stream.scrollTop = stream.scrollHeight;
+      }
+    } else if (['danmaku', 'vision'].includes(msg.type)) {
       console.log('[WS] 处理消息流:', msg.type, msg.data?.content || msg.data?.analysis);
       addMessage(msg, 'messageStream');
       // 如果在消息页面也添加

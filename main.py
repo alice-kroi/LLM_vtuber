@@ -115,6 +115,39 @@ except ImportError:
     vision_danmu_available = False
     VisionDanmuService = None
 
+# 条件导入自主学习模块（奖励机制 + 反馈注入）
+try:
+    from learning import (
+        get_reward_tracker,
+        init_reward_tracker,
+        get_feedback_injector,
+        get_knowledge_curator,
+        get_emotion_pacer,
+        get_memory_reflection,
+    )
+    learning_available = True
+except ImportError as e:
+    learning_available = False
+    logger.warning(f"自主学习模块导入失败: {e}")
+
+# 惰性导入真正的知识库（knowledge_base）管理器，用于 RAG 知识检索
+_kb_manager = None  # 惰性单例
+
+
+def _get_kb_manager():
+    """惰性获取知识库管理器单例（Milvus 不可用返回 None）"""
+    global _kb_manager
+    if _kb_manager is not None:
+        return _kb_manager
+    try:
+        from knowledge_base import KnowledgeBaseManager
+        _kb_manager = KnowledgeBaseManager()
+        logger.info("[RAG] 知识库管理器已初始化（knowledge_base）")
+    except Exception as e:
+        logger.warning(f"[RAG] 知识库管理器初始化失败（降级为无知识库）: {e}")
+        _kb_manager = False  # 标记失败不再重试
+    return _kb_manager if _kb_manager is not False else None
+
 # 全局变量
 args = None
 http_server = None
@@ -131,6 +164,15 @@ danmu_tts_service = None
 # 视觉弹幕服务实例
 vision_danmu_service = None
 _vision_danmu_task = None
+
+# 自主学习模块实例（延迟初始化）
+reward_tracker = None
+feedback_injector = None
+knowledge_curator = None
+emotion_pacer = None
+memory_reflection = None
+_reward_finalize_task = None  # 定时 finalize reward 的后台任务
+_curator_periodic_task = None  # 知识策展 + 记忆反思 定时任务
 
 # 消息处理队列：串行处理弹幕，避免 Live2D/TTS 并发冲突导致死锁
 # （move_to_direction 持锁 1.5s，TTS 播放需独占音频，并发会导致排队卡死）
@@ -217,6 +259,13 @@ async def handle_post_request(request):
             return JSONResponse({"status": "deduped"})
 
         messages = deduped_messages
+
+        # ============ 奖励采集：识别弹幕情感/礼物/SC 并打分 ============
+        if learning_available and reward_tracker is not None:
+            try:
+                asyncio.create_task(reward_tracker.on_messages(messages))
+            except Exception as e:
+                logger.debug(f"奖励采集跳过: {e}")
 
         while _message_queue and _message_queue.qsize() >= _QUEUE_MAX_SIZE:
             try:
@@ -442,6 +491,29 @@ ALLOWED_TONES = {
 }
 
 # 系统提示词常量
+# 电脑操作（Computer Use）共用指引：教 LLM 像真人一样先思考再操作的策略
+COMPUTER_USE_TOOL_LIST = (
+    "os_open_path / os_list_directory / os_list_windows / os_activate_window / "
+    "os_minimize_window / os_show_desktop / os_click_xy / os_type_text / os_press_key / "
+    "os_scroll / ui_list_elements / vision_click"
+)
+COMPUTER_USE_GUIDANCE = f"""## 电脑操作（Computer Use）：操作电脑的思考策略
+可用工具：**{COMPUTER_USE_TOOL_LIST}**
+
+请像真人操作电脑一样**先思考、再动手**，遵循以下决策原则：
+
+1. **打开优先用系统级**：打开"我的电脑/盘符/文件夹/应用"时，优先用 `os_open_path`（调用系统 Shell，最稳），不要用模拟键鼠 win+r。
+2. **先盘点桌面空间**：开始桌面操作前，先 `os_list_windows` 看有哪些窗口、是否遮挡。
+3. **发现遮挡立即清理**：若发现目标被窗口遮挡、或视觉定位 `vision_click` 找不到目标/点击失败，优先最小化遮挡窗口：
+   - 遮挡窗口少 → `os_minimize_window("某窗口标题关键词")`
+   - 遮挡很多或要点桌面图标 → `os_show_desktop()` 一键显示桌面（Win+D）
+   - 最小化后再重试定位/点击。
+4. **读内容用文件系统**：用户问"某盘/文件夹里有什么" → 直接 `os_list_directory` 读文件系统返回准确列表，不要靠截图猜。
+5. **精确坐标靠 UI Automation**：要点击标准控件（按钮/菜单/输入框）时，优先 `ui_list_elements` 拿真实坐标，再 `os_click_xy`；非标准界面才用 `vision_click`。
+6. **每步截图自校验**：关键操作后截图确认结果，失败就修正重试（如最小化遮挡、重新定位），不要盲目继续。
+"""
+
+
 SYSTEM_PROMPT_LIVE2D = """你是虚拟主播「爱莉希雅」，活泼可爱的二次元少女。
 
 ## 输出规则（必须遵守）
@@ -451,10 +523,26 @@ SYSTEM_PROMPT_LIVE2D = """你是虚拟主播「爱莉希雅」，活泼可爱的
 4. 使用口语化表达，结尾用「~」「呢」「呀」
 5. 自然融入直播互动话术（如「感谢关注~」「欢迎新来的朋友~」）
 
-## 搜索工具
+## 搜索工具（纯搜索/抓取）
 - **web_search**: 搜索网页
 - **fetch_webpage**: 抓取URL内容
 
+## Edge 交互浏览器（真正打开可见 Edge 窗口、点击、输入）
+- **browser_snapshot**: 获取 Edge 当前页面的可交互元素列表（带 @eN 引用）
+- **browser_navigate**: 导航 Edge 到指定 URL
+- **browser_click**: 点击 Edge 页面上的元素（用 @eN 引用）
+- **browser_type**: 在 Edge 输入框中输入文本（用 @eN 引用）
+- **browser_press_key**: 按键盘（Enter/Tab/Esc/ArrowUp/Down 等）
+- **browser_scroll**: 滚动页面
+- **browser_tabs**: 管理标签页（list/new/switch/close）
+
+### 浏览器使用原则
+- 用户说「帮我去XX看看」「帮我打开XX」「帮我在浏览器里XX」 → 用 Edge 交互浏览器
+- 用户说「帮我搜一下XX」「XX是什么」 → 优先用 web_search
+- Edge 浏览器已在屏幕上可见，操作后会自动更新页面
+- 推荐流程: browser_navigate → browser_snapshot → browser_click → browser_type → browser_press_key(Enter) → 回到 snapshot
+
+""" + COMPUTER_USE_GUIDANCE + """
 仅在以下情况使用搜索：实时信息、不确定、需事实支撑
 
 ## JSON输出格式
@@ -479,11 +567,25 @@ SYSTEM_PROMPT_DEFAULT = """你是AI助手，请简洁回答。
 3. 禁止输出思考过程
 4. 使用口语化表达
 
-## 搜索工具
+## 搜索工具（纯搜索/抓取）
 - **web_search**: 搜索网页
 - **fetch_webpage**: 抓取URL内容
 
-仅在以下情况使用搜索：实时信息、不确定、需事实支撑"""
+## Edge 交互浏览器（真正打开可见 Edge 窗口、点击、输入）
+- **browser_snapshot**: 获取 Edge 当前页面的可交互元素列表（带 @eN 引用）
+- **browser_navigate**: 导航 Edge 到指定 URL
+- **browser_click**: 点击 Edge 页面上的元素（用 @eN 引用）
+- **browser_type**: 在 Edge 输入框中输入文本（用 @eN 引用）
+- **browser_press_key**: 按键盘（Enter/Tab/Esc/ArrowUp/Down 等）
+- **browser_scroll**: 滚动页面
+- **browser_tabs**: 管理标签页（list/new/switch/close）
+
+### 浏览器使用原则
+- 用户说「帮我去XX看看」「帮我打开XX」「帮我在浏览器里XX」 → 用 Edge 交互浏览器
+- 用户说「帮我搜一下XX」「XX是什么」 → 优先用 web_search
+- Edge 浏览器已在屏幕上可见，操作后会自动更新页面
+
+""" + COMPUTER_USE_GUIDANCE + "仅在以下情况使用搜索：实时信息、不确定、需事实支撑"
 
 # 默认LLM配置
 DEFAULT_MODEL = "doubao-seed-1-8-251228"
@@ -746,6 +848,135 @@ class LangGraphManager:
 
         logger.info("LangGraph 图结构构建完成")
 
+        # ============ 初始化自主学习模块 ============
+        if learning_available:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._init_learning_modules_async())
+            except RuntimeError:
+                # build_graph 在非 async 上下文中被调用时（比如命令行直接 import）
+                # 此时还没有 running loop，同步初始化即可
+                self._init_learning_modules_sync()
+
+    async def _init_learning_modules_async(self):
+        """异步初始化（有 running loop 时走这条路径）"""
+        global reward_tracker, _curator_periodic_task
+        try:
+            await init_reward_tracker(self.memory_manager)
+            reward_tracker = get_reward_tracker()
+            logger.info("[自主学习] RewardTracker 已初始化（异步）")
+        except Exception as e:
+            logger.error(f"[自主学习] RewardTracker 异步初始化失败: {e}")
+            return
+
+        self._init_learning_modules_remaining()
+
+        # 启动后台周期任务（知识策展 + 记忆反思），自主学习真正在后台跑起来
+        if _curator_periodic_task is None or _curator_periodic_task.done():
+            _curator_periodic_task = asyncio.create_task(self._learning_periodic_loop())
+            logger.info("[自主学习] 后台自主学习周期任务已启动")
+
+    async def _learning_periodic_loop(self):
+        """
+        后台自主学习周期循环：知识策展 + 记忆反思
+
+        流程（每轮一个周期）：
+        1. try 记忆反思提炼（LLM）—— 可能耗时
+        2. sleep 一段可配置时长
+        3. 重试
+        """
+        global knowledge_curator, memory_reflection
+        import time
+        last_curate_ts = 0.0
+        REFLECT_INTERVAL = 600      # 反思最短间隔 10 分钟（内部还有 30 分钟节流）
+        CURATE_INTERVAL = 3600      # 知识策展最短间隔 1 小时
+        while True:
+            try:
+                # 1. 记忆反思（异步提炼洞察）
+                if memory_reflection is not None:
+                    await memory_reflection.run_periodic()
+
+                # 2. 知识策展（提炼高奖励模式）
+                now = time.time()
+                if knowledge_curator is not None and (now - last_curate_ts) >= CURATE_INTERVAL:
+                    try:
+                        await knowledge_curator.curate_high_reward_patterns(force=False)
+                        last_curate_ts = time.time()
+                    except Exception as e:
+                        logger.error(f"[后台] 知识策展异常: {e}")
+
+            except asyncio.CancelledError:
+                logger.info("[后台] 自主学习周期任务被取消")
+                break
+            except Exception as e:
+                logger.error(f"[后台] 自主学习周期任务异常: {e}")
+
+            await asyncio.sleep(REFLECT_INTERVAL)
+
+    def _init_learning_modules_sync(self):
+        """同步 fallback（没有 running loop 时）"""
+        global reward_tracker
+        try:
+            reward_tracker = get_reward_tracker()
+            reward_tracker._memory_manager = self.memory_manager
+            reward_tracker._initialized = True
+            logger.info("[自主学习] RewardTracker 已初始化（同步 fallback）")
+        except Exception as e:
+            logger.error(f"[自主学习] RewardTracker 同步初始化失败: {e}")
+            return
+
+        self._init_learning_modules_remaining()
+
+    def _init_learning_modules_remaining(self):
+        """初始化 feedback_injector + knowledge_curator + emotion_pacer + memory_reflection"""
+        global feedback_injector, knowledge_curator, emotion_pacer, memory_reflection
+
+        try:
+            feedback_injector = get_feedback_injector(
+                min_score=5,
+                max_examples=3,
+                since_hours=24.0,
+                enabled=True,
+            )
+            logger.info("[自主学习] FeedbackInjector 已初始化 (min_score=5, max_examples=3)")
+        except Exception as e:
+            logger.warning(f"[自主学习] FeedbackInjector 初始化失败: {e}")
+
+        try:
+            knowledge_curator = get_knowledge_curator(
+                memory_manager=self.memory_manager,
+                min_curate_score=10,
+                curate_interval_minutes=60.0,
+            )
+            logger.info("[自主学习] KnowledgeCurator 已初始化")
+        except Exception as e:
+            logger.warning(f"[自主学习] KnowledgeCurator 初始化失败: {e}")
+
+        try:
+            emotion_pacer = get_emotion_pacer()
+            logger.info("[自主学习] EmotionPacer 已初始化（情绪节奏器）")
+        except Exception as e:
+            logger.warning(f"[自主学习] EmotionPacer 初始化失败: {e}")
+
+        try:
+            memory_reflection = get_memory_reflection(
+                memory_manager=self.memory_manager,
+                max_insights_per_run=3,
+                interval_minutes=30.0,
+                enabled=True,
+            )
+            logger.info("[自主学习] MemoryReflection 已初始化（异步记忆反思）")
+        except Exception as e:
+            logger.warning(f"[自主学习] MemoryReflection 初始化失败: {e}")
+
+        logger.info(
+            f"[自主学习] 模块就绪: RewardTracker={reward_tracker is not None}, "
+            f"FeedbackInjector={feedback_injector is not None}, "
+            f"KnowledgeCurator={knowledge_curator is not None}, "
+            f"EmotionPacer={emotion_pacer is not None}, "
+            f"MemoryReflection={memory_reflection is not None}"
+        )
+
     def _rag_retrieval_node(self, state: LLMState) -> LLMState:
         """RAG 检索节点：从 Milvus 检索相关上下文
 
@@ -811,11 +1042,80 @@ class LangGraphManager:
             state["context"] = rag_result.get("context")
             state["retrieved_documents"] = rag_result.get("retrieved_documents")
             logger.info(f"RAG 检索完成，找到 {rag_result.get('num_documents', 0)} 个文档")
+
+            # ============ 真正的知识库 RAG：从 knowledge_base 检索领域知识 ============
+            # 说明：上方 rag_retrieval_node 检索的是 chat_history（历史对话）；
+            # 这里补充从独立知识库检索虚拟主播等领域知识，作为真正的 RAG 上下文注入
+            knowledge_ctx = self._search_knowledge_base(query_text, top_k=3)
+            if knowledge_ctx:
+                state["knowledge_context"] = knowledge_ctx
+                # 知识优先注入（拼在历史上下文之前，让 LLM 优先消费领域知识）
+                existing_ctx = state.get("context") or ""
+                state["context"] = (
+                    f"{knowledge_ctx}\n\n{existing_ctx}" if existing_ctx else knowledge_ctx
+                )
+                logger.info(f"[RAG] 已从 knowledge_base 注入知识上下文（{len(knowledge_ctx)}字符）")
+
             return state
 
         except Exception as e:
             logger.error(f"RAG 检索节点失败: {e}")
             return state
+
+    def _search_knowledge_base(self, query: str, top_k: int = 3) -> str:
+        """
+        从 knowledge_base 知识库做语义检索，返回格式化知识文本。
+
+        Args:
+            query: 查询文本
+            top_k: 返回知识条数
+
+        Returns:
+            格式化知识字符串；无命中或不可用时返回空串
+        """
+        kb = _get_kb_manager()
+        if kb is None or not query:
+            return ""
+        try:
+            hits = kb.search(query, top_k=top_k)
+            if not hits:
+                return ""
+            parts = []
+            for i, hit in enumerate(hits, 1):
+                score = hit.get("score", 0)
+                content = (hit.get("content") or "").strip()
+                if not content:
+                    continue
+                # 低于阈值的跳过（score 是 COSINE 相似度，越高越好）
+                if score < 0.30:
+                    continue
+                parts.append(f"{i}. {content}")
+            return "\n".join(parts)
+        except Exception as e:
+            logger.warning(f"[RAG] 知识库检索失败: {e}")
+            return ""
+
+    def _make_first_token_push(self):
+        """
+        P0：首字流式 —— 生成一个同步回调，把 LLM 首个内容片段尽早推送到 WebSocket。
+
+        返回的同步函数会在 LLM 流式生成首个内容时被调用；
+        内部用 create_task 异步广播，绝不阻塞生成。
+        """
+        async def _push(text):
+            try:
+                from webui.app import ws_manager
+                await ws_manager.broadcast_ai_stream_start(text)
+                logger.debug(f"[流式] 已推送首字: {text[:20]}")
+            except Exception as e:
+                logger.debug(f"[流式] 首字推送失败: {e}")
+
+        def _cb(text):
+            try:
+                asyncio.create_task(_push(text))
+            except Exception:
+                pass
+        return _cb
 
     @staticmethod
     def _simplify_query(text: str) -> str:
@@ -905,6 +1205,39 @@ class LangGraphManager:
                 SYSTEM_PROMPT_LIVE2D if self.enable_live2d else SYSTEM_PROMPT_DEFAULT
             )
 
+            # ============ 反馈注入：追加历史高奖励案例作为 few-shot ============
+            if learning_available and feedback_injector is not None:
+                try:
+                    session_id = state.get("session_id", state.get("thread_id", "default"))
+                    system_prompt = await feedback_injector.inject_into_system_prompt(
+                        system_prompt,
+                        memory_manager=self.memory_manager,
+                        session_id=session_id,
+                    )
+                except Exception as e:
+                    logger.debug(f"反馈注入跳过: {e}")
+
+            # ============ 情绪节奏：根据近期语气分布调整提示 ============
+            if learning_available and emotion_pacer is not None:
+                try:
+                    # 取最近回复聚合的奖励分作为活跃度信号
+                    recent_reward = 0.0
+                    if reward_tracker is not None:
+                        recent_high = reward_tracker.get_recent_high_reward(1)
+                        recent_low = reward_tracker.get_recent_low_reward(1)
+                        if recent_high:
+                            recent_reward = recent_high[0].get("total_score", 0)
+                        elif recent_low:
+                            recent_reward = recent_low[0].get("total_score", 0)
+                    advice = emotion_pacer.get_advice(recent_reward)
+                    if advice.get("kind") != "neutral":
+                        system_prompt = emotion_pacer.nudge_system_prompt(system_prompt, advice)
+                        logger.info(
+                            f"[情绪节奏] {advice['kind']}: {advice['reason']}"
+                        )
+                except Exception as e:
+                    logger.debug(f"情绪节奏跳过: {e}")
+
             # 如果上下文控制已启用，RAG 上下文已整合到 messages 中，不再需要单独拼接
             context_controlled = state.get("context_controlled", False)
             llm_context = None if context_controlled else state.get("context")
@@ -918,7 +1251,9 @@ class LangGraphManager:
                 max_tokens=DEFAULT_MAX_TOKENS,
                 question=user_message.get("content", ""),
                 context=llm_context,
-                name=user_message.get("name")
+                name=user_message.get("name"),
+                # P0：首字流式回调 —— LLM 首个内容到达即推送到 WebSocket（首字优先）
+                on_stream_first=self._make_first_token_push(),
             )
 
             # 根据是否有上下文选择不同节点（均为 async 调用）
@@ -941,6 +1276,13 @@ class LangGraphManager:
             state["visual_focus"] = parsed["visual_focus"]
             state["mouth_state"] = parsed["mouth_state"]
 
+            # ============ 情绪节奏：记录本次使用的语气 ============
+            if learning_available and emotion_pacer is not None:
+                try:
+                    emotion_pacer.record_tone(parsed["tone"])
+                except Exception as e:
+                    logger.debug(f"情绪记录跳过: {e}")
+
             # P0优化: 回复长度硬约束
             content = parsed["content"]
             if content and len(content) > MAX_RESPONSE_LENGTH:
@@ -954,6 +1296,13 @@ class LangGraphManager:
                 logger.info(f"LLM 处理完成，语气: {parsed['tone']}, 目光: {parsed['visual_focus']}, 嘴巴: {parsed['mouth_state']}")
             else:
                 logger.info(f"LLM 处理完成，语气: {parsed['tone']} (Live2D未启用)")
+
+            # ============ 奖励追踪：开始追踪这条 AI 回复 ============
+            if learning_available and reward_tracker is not None:
+                try:
+                    reward_tracker.bind_to_response(parsed["content"])
+                except Exception as e:
+                    logger.debug(f"奖励绑定跳过: {e}")
 
             # WebSocket 推送 AI 回复（danmaku 已在 handle_post_request 中推送，避免重复）
             try:
@@ -1013,10 +1362,18 @@ class LangGraphManager:
             tasks.append(self._async_live2d_action(state_snapshot))
         
         # 4. TTS 合成与播放（检查用户是否启用 + 模块是否可用）
-        if self.enable_tts:
+        # S3：若 LLM 已主动调用 tts_synthesize，跳过自动 TTS 兜底，避免重复发声
+        llm_called_tts = state_snapshot.get("tts_called", False)
+        if llm_called_tts:
+            logger.info("[TTS] LLM 已主动调用 tts_synthesize，跳过自动 TTS")
+        elif self.enable_tts:
             tasks.append(self._async_tts_synthesize(state_snapshot, "local"))
         elif self.enable_cloud_tts:
             tasks.append(self._async_tts_synthesize(state_snapshot, "cloud"))
+        
+        # 5. 奖励 finalize（聚合这条 AI 回复收到的弹幕奖励）
+        if learning_available and reward_tracker is not None:
+            tasks.append(self._async_finalize_reward())
         
         # 使用 create_task 并行执行所有后处理任务（在 async 上下文中安全）
         if tasks:
@@ -1083,6 +1440,37 @@ class LangGraphManager:
                 logger.info("[并行] 云端 TTS 合成完成")
         except Exception as e:
             logger.error(f"[并行] TTS 合成异常({mode}): {e}")
+
+    async def _async_finalize_reward(self):
+        """异步奖励 finalize：聚合 AI 回复窗口内的弹幕奖励，并触发 S11 反向学习"""
+        try:
+            await asyncio.sleep(0)
+            global reward_tracker, knowledge_curator
+            if reward_tracker is not None:
+                # 等几秒钟让弹幕陆续到达再 finalize
+                await asyncio.sleep(15)
+                await reward_tracker.finalize_current_response()
+                # S11：低奖励回复记录为"避免模式"，供正向注入反例
+                if learning_available and knowledge_curator is not None:
+                    try:
+                        recent_low = reward_tracker.get_recent_low_reward(1)
+                        if recent_low:
+                            low = recent_low[0]
+                            text = low.get("response_text", "")
+                            score = low.get("total_score", 0)
+                            if text and score < 0:
+                                await knowledge_curator.record_avoid_pattern(
+                                    text=text,
+                                    score=score,
+                                    reason=f"低奖励 {score}分，弹幕反馈不佳",
+                                )
+                                logger.info(
+                                    f"[S11] 已记录避免模式（{score}分）: {text[:40]}..."
+                                )
+                    except Exception as e:
+                        logger.debug(f"[S11] 反向学习跳过: {e}")
+        except Exception as e:
+            logger.error(f"[并行] 奖励 finalize 异常: {e}")
 
     def _rag_save_node(self, state: LLMState) -> LLMState:
         """
@@ -2004,6 +2392,7 @@ def main():
 
         # 加载浏览器工具配置并启动浏览器
         browser_enabled = False
+        edge_agent_enabled = False
         try:
             import configparser
             config = configparser.ConfigParser(interpolation=None)
@@ -2011,11 +2400,27 @@ def main():
             config.read(config_ini_path, encoding='utf-8')
 
             if config.has_section("browser") and config.getboolean("browser", "enabled", fallback=False):
-                from tool.browser_tool import browser_manager, configure_from_ini
-                configure_from_ini(config)
-                await browser_manager.start(headless=config.getboolean("browser", "headless", fallback=True))
-                browser_enabled = True
-                logger.info("浏览器工具已启用")
+                # EdgeAgent (交互式 Edge，带 snapshot/@ref) —— 按需启动
+                # 惰性启动：只缓存启动参数，首次调用浏览器工具时才真正拉起 Edge，
+                # 避免每次运行主程序都自动弹出 Edge 窗口。
+                if config.has_option("browser", "edge_interactive") and config.getboolean("browser", "edge_interactive"):
+                    from tool.edge_agent import EdgeAgent
+                    _edge_agent = EdgeAgent.get_instance()
+                    _ea_mode = config.get("browser", "mode", fallback="headed").strip()
+                    _ea_cdp = config.get("browser", "cdp_url", fallback="").strip() or None
+                    _ea_channel = config.get("browser", "channel", fallback="msedge").strip()
+                    _ea_maximized = config.getboolean("browser", "start_maximized", fallback=True)
+                    _edge_agent.configure(mode=_ea_mode, cdp_url=_ea_cdp,
+                                          channel=_ea_channel, start_maximized=_ea_maximized)
+                    edge_agent_enabled = True
+                    logger.info(f"✅ Edge 交互浏览器已配置（惰性启动，首次调用工具时再打开，mode={_ea_mode}）")
+                else:
+                    # 传统 headless 浏览器（web_search/fetch_webpage 用）
+                    from tool.browser_tool import browser_manager, configure_from_ini
+                    configure_from_ini(config)
+                    await browser_manager.start(headless=config.getboolean("browser", "headless", fallback=True))
+                    browser_enabled = True
+                    logger.info("浏览器工具已启用")
             else:
                 logger.info("浏览器工具未启用（config.ini [browser] enabled=false 或无配置）")
         except Exception as e:
@@ -2168,6 +2573,14 @@ def main():
                     await browser_manager.stop()
                 except Exception as e:
                     logger.warning(f"关闭浏览器失败: {e}")
+
+            if edge_agent_enabled:
+                try:
+                    from tool.edge_agent import EdgeAgent
+                    _ea = EdgeAgent.get_instance()
+                    await _ea.stop()
+                except Exception as e:
+                    logger.warning(f"关闭 EdgeAgent 失败: {e}")
 
             # 关闭 Live2D 连接
             if live2d_manager:

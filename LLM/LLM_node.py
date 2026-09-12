@@ -18,10 +18,11 @@ import asyncio
 import logging
 import json
 import re
+import os
 
 from typing_extensions import TypedDict
 from langchain_core.messages import AnyMessage
-from typing import Optional
+from typing import Optional, Any
 
 from chat_model import ChatState, doubao_chat_node
 
@@ -47,7 +48,7 @@ INTENT_EXAMPLES = {
         ]
     },
     "force_search": {
-        "max_rounds": 2,
+        "max_rounds": 5,
         "examples": [
             "今天天气怎么样", "最新新闻", "最近有什么事",
             "现在几点", "实时行情", "当前时间",
@@ -75,7 +76,7 @@ INTENT_EXAMPLES = {
         ]
     },
     "normal": {
-        "max_rounds": 2,
+        "max_rounds": 4,
         "examples": [
             "你觉得呢", "怎么样", "好的",
             "真的吗", "是吗", "嗯",
@@ -284,7 +285,7 @@ class IntentClassifier:
 
         # ---- 兜底：默认 normal ----
         logger.info(f"[意图分类] 默认处理: '{msg[:30]}'")
-        return {"action": "normal", "max_rounds": 2, "reason": "默认处理"}
+        return {"action": "normal", "max_rounds": 4, "reason": "默认处理"}
 
 
 def summarize_search_results(results: list, max_chars: int = 500) -> str:
@@ -326,15 +327,21 @@ _ALL_TOOLS = None
 
 
 def _get_browser_tools():
-    """延迟获取浏览器工具 Schema"""
+    """延迟获取浏览器工具 Schema（含 EdgeAgent 交互式工具）"""
     global _BROWSER_TOOLS
     if _BROWSER_TOOLS is None:
+        all_schemas = []
         try:
             from tool.browser_tool import BROWSER_TOOLS_SCHEMA
-            _BROWSER_TOOLS = BROWSER_TOOLS_SCHEMA
+            all_schemas.extend(BROWSER_TOOLS_SCHEMA)
         except ImportError:
-            _BROWSER_TOOLS = []
-            logger.warning("browser_tool 模块未安装，浏览器工具不可用")
+            logger.warning("browser_tool 模块未安装，浏览器搜索/抓取工具不可用")
+        try:
+            from tool.edge_agent import EDGE_AGENT_TOOLS_SCHEMA
+            all_schemas.extend(EDGE_AGENT_TOOLS_SCHEMA)
+        except ImportError:
+            logger.warning("edge_agent 模块不可用，Edge 交互浏览器工具不可用")
+        _BROWSER_TOOLS = all_schemas
     return _BROWSER_TOOLS
 
 
@@ -352,15 +359,43 @@ def _get_vision_tools():
 
 
 def _get_all_tools():
-    """获取所有可用工具 Schema（浏览器 + 视觉）"""
+    """获取所有可用工具 Schema（浏览器 + 视觉 + 电脑操作 + TTS）"""
     global _ALL_TOOLS
     if _ALL_TOOLS is None:
         all_tools = []
         all_tools.extend(_get_browser_tools())
         all_tools.extend(_get_vision_tools())
+        try:
+            from tool.computer_use import COMPUTER_USE_TOOLS_SCHEMA
+            all_tools.extend(COMPUTER_USE_TOOLS_SCHEMA)
+        except ImportError:
+            pass
+        all_tools.append(_TTS_TOOL_SCHEMA)
         _ALL_TOOLS = all_tools
         logger.info(f"已加载 {len(all_tools)} 个工具 Schema")
     return _ALL_TOOLS
+
+
+# S3：TTS 工具 schema（供 LLM 主动朗读/播报，遵循 OpenAI function 嵌套格式）
+_TTS_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "tts_synthesize",
+        "description": (
+            "主动合成并播放语音。仅在需要朗读一段文本（如搜索结果、长文播报）"
+            "或用户明确要求'读出来/播一下'时调用。常规回答系统会自动播放，无需调用。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "要朗读的文本内容"},
+                "tone": {"type": "string", "description": "语气，可选：开心/撒娇/调皮/温柔/惊讶/疑问/普通"},
+                "mode": {"type": "string", "description": "引擎，cloud（云端，默认）/ local（本地）"},
+            },
+            "required": ["text"],
+        },
+    },
+}
 
 
 class LLMState(ChatState):
@@ -382,6 +417,16 @@ class LLMState(ChatState):
     search_performed: bool = False
     search_results_count: int = 0
     search_rounds: int = 0
+    # S3：LLM 是否主动调用了 tts_synthesize（用于跳过自动 TTS 兜底）
+    tts_called: bool = False
+    tts_mode: str = ""
+    # S5/S6：thinking_mode 思考升级（默认关闭）
+    thinking_mode: bool = False
+    final_plan: str = ""
+    revision_note: str = ""
+    reflection_last: str = ""
+    # P0：首字流式回调（外部注入；回调签名 f(text)，用于推 WebSocket 首字）
+    on_stream_first: Optional[Any] = None
 
 
 def _extract_last_user_question(state: LLMState) -> Optional[str]:
@@ -417,7 +462,39 @@ async def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
         intent = IntentClassifier.classify(question)
         max_tool_rounds = intent["max_rounds"]
         skip_tools = intent["action"] == "skip"
+        # 电脑操作类指令通常是多步（打开程序→定位→输入→回车→保存），加大轮次上限以适应
+        _COMPUTER_USE_KEYWORDS = (
+            "打开", "点击", "打开程序", "打开软件", "运行", "记事本", "输入", "打字", "按",
+            "键盘", "鼠标", "桌面上", "窗口", "保存", "新建", "浏览器打开", "打开浏览器",
+            "启动", "操作电脑", "帮我操作", "关掉", "关闭",
+        )
+        # 标记是否为电脑操作意图，用于抗幻觉守卫（见工具调用循环）
+        computer_intent = any(k in question for k in _COMPUTER_USE_KEYWORDS)
+        if computer_intent:
+            max_tool_rounds = max(max_tool_rounds, 10)
+            logger.info(f"[电脑操作] 识别到多步操作意图，轮次上限提升至 {max_tool_rounds}")
         logger.info(f"[意图分类] action={intent['action']}, max_rounds={max_tool_rounds}, reason={intent['reason']}")
+
+        # ---- P1 语义缓存：简单互动（skip/normal）命中则直接复用回复，不再调 LLM ----
+        # 缓存命中无需 LLM 生成，故不受 on_stream_first（流式首字）限制，优先快速返回
+        # 电脑操作类指令含"点击/打开/点位"等工具意图，语义缓存易误配历史回复导致跳过真实操作 → 一律不缓存
+        cacheable = intent["action"] in ("skip", "normal") and not computer_intent
+        if cacheable:
+            try:
+                from LLM.semantic_cache import get_semantic_cache
+                cached_resp, hit = get_semantic_cache().get(question)
+                if hit and cached_resp:
+                    logger.info(f"[语义缓存] 命中，直接复用回复: {cached_resp[:40]}...")
+                    return {
+                        **state,
+                        "response": cached_resp,
+                        "messages": state.get("messages", []),
+                        "search_performed": False,
+                        "search_rounds": 0,
+                        "cache_hit": True,
+                    }
+            except Exception as e:
+                logger.debug(f"[语义缓存] 查询失败: {e}")
 
         # 构建 system prompt（可选拼上 RAG 上下文）
         system_prompt = state["system_prompt"] or ""
@@ -426,13 +503,40 @@ async def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
 
         logger.info(f"处理用户问题: {question[:50]}...")
 
+        # ---- S6: Plan-and-Execute（thinking_mode 且非 skip 意图时生成计划）----
+        thinking_mode = bool(state.get("thinking_mode", False))
+        plan_text = ""
+        if thinking_mode and not skip_tools and len(question) >= 6:
+            try:
+                from LLM.reasoning_agent import get_reasoning_agent
+                plan_text = get_reasoning_agent().plan_task(question, system_prompt)
+                if plan_text:
+                    system_prompt = (
+                        f"{system_prompt}\n\n[执行计划]\n{plan_text}"
+                    ).strip()
+                    logger.info(f"[S6] Plan-and-Execute 已生成计划: {plan_text[:80]}...")
+            except Exception as e:
+                logger.debug(f"[S6] 计划生成跳过: {e}")
+
+        # P2 模型分层路由：按意图选快/慢模型 + 预算
+        route = choose_route(
+            intent["action"],
+            base_model=state["model"],
+            fast_model=os.environ.get("ROUTE_FAST_MODEL", "").strip(),
+            base_max_tokens=state.get("max_tokens", 500),
+        )
+        if route["fast_ref"]:
+            logger.info(f"[路由] 简单意图'{intent['action']}' → 快模型 {route['model']}")
+        else:
+            logger.debug(f"[路由] 意图'{intent['action']}' → 模型 {route['model']}")
+
         # 组装 ChatState（保持 name 传递）
         chat_state = ChatState(
             messages=state["messages"],
             system_prompt=system_prompt,
-            model=state["model"],
+            model=route["model"],
             temperature=state["temperature"],
-            max_tokens=state["max_tokens"],
+            max_tokens=route["max_tokens"],
             name=state.get("name")
         )
 
@@ -440,16 +544,50 @@ async def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
         tool_round = 0
         had_tool_calls = False
         search_results_count = 0
+        # 抗幻觉守卫：电脑操作意图下若 LLM 未调用任何工具就声称完成，强制重试直到真实执行工具链
+        guard_retries = 0
+        _GUARD_MAX_RETRIES = 2
+
+        # P0：首字流式 —— 若传入 on_stream_first，最终生成改走 chat_stream 并回调首字
+        _stream_cb = state.get("on_stream_first")
+
+        def _chat(cur_state, cur_tools):
+            if _stream_cb is not None:
+                from chat_model import chat_stream
+                try:
+                    return chat_stream(cur_state, tools=cur_tools, on_first_token=_stream_cb)
+                except Exception as _e:
+                    logger.warning(f"[流式] chat_stream 失败，回退非流式: {_e}")
+                    return doubao_chat_node(cur_state, tools=cur_tools)
+            return doubao_chat_node(cur_state, tools=cur_tools)
 
         # 意图预判：跳过工具时不传递 tools
         effective_tools = None if skip_tools else tools
 
         while True:
             logger.info(f"[LLM] 工具调用第 {tool_round} 轮 (max={max_tool_rounds})")
-            result = doubao_chat_node(chat_state, tools=effective_tools)
+            result = _chat(chat_state, effective_tools)
 
             tool_calls = result.get("tool_calls")
             if not tool_calls or tool_round >= max_tool_rounds:
+                # 抗幻觉守卫：电脑操作意图下 LLM 跳过了工具、直接输出"已完成"类回复 → 强制重试
+                if computer_intent and not had_tool_calls and guard_retries < _GUARD_MAX_RETRIES:
+                    guard_retries += 1
+                    logger.warning(
+                        f"[抗幻觉] 电脑操作意图却未调用任何工具（第{guard_retries}次强制重试），"
+                        f"LLM回复: {(result.get('response') or '')[:60]}"
+                    )
+                    chat_state["messages"] = list(chat_state.get("messages", []))
+                    chat_state["messages"].append({
+                        "role": "system",
+                        "content": "警告：你刚才没有调用任何电脑操作工具，却声称已经完成了用户的电脑操作要求。"
+                                   "这属于错误行为。用户要求的任务必须通过真实调用 os_list_windows / "
+                                   "os_activate_window / os_click_xy / os_type_text / os_press_key / "
+                                   "os_scroll / ui_list_elements / vision_click 等工具来逐步执行，"
+                                   "禁止仅靠文字回复冒充已完成。请立即规划并按步骤调用工具完成该任务。"
+                    })
+                    logger.info(f"[抗幻觉] 注入守卫提示并重试，guard_retries={guard_retries}")
+                    continue
                 break
 
             had_tool_calls = True
@@ -458,6 +596,14 @@ async def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
 
             tool_results = await _execute_tool_calls(tool_calls)
             search_results_count += sum(1 for tr in tool_results if tr.get("result") is not None)
+
+            # S3：若 LLM 主动调用了 TTS，标记以跳过本轮自动 TTS 兜底
+            for tc in tool_calls:
+                if tc["name"] == "tts_synthesize":
+                    state["tts_called"] = True
+                    state["tts_mode"] = "tool"
+                    logger.info("[LLM] 已主动调用 tts_synthesize，本轮跳过自动 TTS 兜底")
+                    break
 
             new_messages = list(chat_state.get("messages", []))
             new_messages.append({
@@ -493,9 +639,11 @@ async def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
                 new_messages.append({
                     "role": "tool",
                     "tool_call_id": tr["tool_call_id"],
-                    "content": json.dumps(result_content, ensure_ascii=False)
-                        if result_content is not None
+                    # P3 工具结果规范化：统一 JSON + 按预算截断，防上下文膨胀
+                    "content": normalize_tool_result(
+                        result_content if result_content is not None
                         else (tr.get("error") or "工具执行失败")
+                    )
                 })
 
             chat_state["messages"] = new_messages
@@ -503,19 +651,74 @@ async def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
 
         if had_tool_calls:
             logger.info("[LLM] 工具调用完毕，生成最终回答")
-            result = doubao_chat_node(chat_state, tools=None)
+            result = _chat(chat_state, None)
 
         search_performed = tool_round > 0
 
+        # ---- S5: ReAct 自我反思（thinking_mode 下对最终回答做一次自评修正）----
+        final_response = result.get("response")
+        revision_note = ""
+        if thinking_mode and final_response:
+            try:
+                from LLM.reasoning_agent import get_reasoning_agent
+                persona = system_prompt[:150]
+                review = get_reasoning_agent().reflect_answer(question, final_response, persona)
+                if not review.get("satisfied", True) and review.get("suggestion"):
+                    revision_note = review["suggestion"]
+                    logger.info(f"[S5] 反思不满意，二次修正: {revision_note}")
+                    # 用建议重生成一次最终答案（保留工具消息历史作为上下文）
+                    try:
+                        revised = doubao_chat_node({
+                            **chat_state,
+                            "system_prompt": (
+                                f"{system_prompt}\n\n[修正建议]\n{revision_note}"
+                                " 请按此建议润色刚才的回答。"
+                            ),
+                        }, tools=None)
+                        if revised.get("response"):
+                            result = revised
+                            final_response = revised.get("response")
+                    except Exception as e:
+                        logger.debug(f"[S5] 二次修正失败: {e}")
+                else:
+                    logger.info("[S5] 反思通过，无需修正")
+            except Exception as e:
+                logger.debug(f"[S5] 反思跳过: {e}")
+
+        # ---- P3 Guardrails：对最终回复做护栏清洗（拦截违规/删除思考痕迹/截断）----
+        if final_response:
+            try:
+                from LLM.guardrails import guard_reply
+                g = guard_reply(final_response)
+                if g["reason"] == "blocked_keyword":
+                    logger.warning("[护栏] 回复含违规内容，已拦截")
+                    final_response = ""
+                elif g["text"] != final_response:
+                    logger.info(f"[护栏] 回复已清洗: {final_response[:30]} -> {g['text'][:30]}")
+                    final_response = g["text"]
+            except Exception as e:
+                logger.debug(f"[护栏] 校验失败(忽略): {e}")
+
+        # ---- P1 语义缓存：生成后写入缓存，供相似弹幕复用 ----
+        if cacheable and final_response:
+            try:
+                from LLM.semantic_cache import get_semantic_cache
+                get_semantic_cache().put(question, final_response)
+            except Exception as e:
+                logger.debug(f"[语义缓存] 写入失败: {e}")
+
         return {
             **state,
-            "response": result.get("response"),
+            "response": final_response,
             "messages": result.get("messages", state["messages"]),
             "tokens_used": result.get("tokens_used", 0),
             "error": result.get("error"),
             "search_performed": search_performed,
             "search_results_count": search_results_count,
-            "search_rounds": tool_round
+            "search_rounds": tool_round,
+            "thinking_mode": thinking_mode,
+            "final_plan": plan_text,
+            "revision_note": revision_note,
         }
 
     except Exception as e:
@@ -529,41 +732,73 @@ async def _run_doubao_chat(state: LLMState, *, with_context: bool) -> dict:
         }
 
 
+# P3 工具结果规范化：统一 JSON + 按预算截断，防上下文膨胀
+def normalize_tool_result(result: Any, max_chars: int = 2000) -> str:
+    """
+    将工具返回结果规范化为受控长度的 JSON 字符串（供注入 LLM 上下文）。
+
+    - dict/list → json.dumps
+    - 非 json 化类型 → str
+    - 超 max_chars 截断并追加 "…"
+    """
+    if result is None:
+        return "null"
+    try:
+        if isinstance(result, (dict, list)):
+            text = json.dumps(result, ensure_ascii=False, default=str)
+        else:
+            text = str(result)
+    except Exception:
+        text = str(result)
+    if len(text) > max_chars:
+        return text[:max_chars - 1] + "…"
+    return text
+
+
 async def _execute_tool_calls(tool_calls: list) -> list:
-    """执行工具调用列表，返回结果列表（含独立降级保护）"""
+    """
+    执行工具调用列表（P0：并行执行相互独立的工具，一次往返并发降低延迟）
+
+    每个工具调用有独立的超时与降级保护；结果顺序与输入一致（供 LLM 正确对应）。
+    """
     from tool.tool_node import tool_registry
 
-    results = []
-    for tc in tool_calls:
+    async def _run_one(tc):
         tool_call = {
             "tool_call_id": tc["tool_call_id"],
             "name": tc["name"],
             "arguments": tc["arguments"]
         }
-        logger.info(f"[LLM] 执行工具: {tc['name']}(args={tc['arguments']})")
+        logger.info(f"[LLM] 执行工具(并行): {tc['name']}(args={tc['arguments']})")
         try:
             result = await asyncio.wait_for(
                 tool_registry.execute_tool(tool_call, timeout=60.0),
                 timeout=60.0
             )
-            results.append(result)
             logger.info(f"[LLM] 工具结果: {tc['name']} -> "
                         f"{'成功' if result.get('result') else '失败'}")
+            return result
         except asyncio.TimeoutError:
             logger.error(f"[LLM] 工具超时: {tc['name']} (60s)")
-            results.append({
+            return {
                 "tool_call_id": tc["tool_call_id"],
-                "error": f"工具执行超时（超过60秒）",
+                "error": "工具执行超时（超过60秒）",
                 "result": None
-            })
+            }
         except Exception as e:
             logger.error(f"[LLM] 工具异常: {tc['name']} -> {str(e)}")
-            results.append({
+            return {
                 "tool_call_id": tc["tool_call_id"],
                 "error": f"工具执行异常: {str(e)}",
                 "result": None
-            })
-    return results
+            }
+
+    if not tool_calls:
+        return []
+    if len(tool_calls) == 1:
+        return [await _run_one(tool_calls[0])]
+    # 多工具：并行执行，保持结果顺序
+    return list(await asyncio.gather(*(_run_one(tc) for tc in tool_calls)))
 
 
 async def llm_chat_node(state: LLMState) -> LLMState:
@@ -574,6 +809,31 @@ async def llm_chat_node(state: LLMState) -> LLMState:
 async def context_aware_qa_node(state: LLMState) -> LLMState:
     """上下文感知的问题回答节点（拼上 state['context'] 后调用 LLM）"""
     return await _run_doubao_chat(state, with_context=True)
+
+
+# P2 模型分层路由：简单意图→快模型/低预算；复杂意图→思考/慢模型
+def choose_route(intent_action: str, base_model: str, fast_model: str = "",
+                 base_max_tokens: int = 500) -> dict:
+    """
+    根据意图选择推理路由（模型 + token 预算）。
+
+    Args:
+        intent_action: IntentClassifier 的 action（skip/normal/reduce_rounds/force_search）
+        base_model: 默认（复杂/思考）模型
+        fast_model: 可选快模型名（来自 ROUTE_FAST_MODEL 环境变量），空则不切模型
+        base_max_tokens: 默认生成预算
+
+    Returns:
+        {"model": str, "max_tokens": int, "fast_ref": bool}
+    """
+    complex_actions = ("reduce_rounds", "force_search")
+    if intent_action in complex_actions:
+        # 复杂问题：默认（思考优先）模型 + 普通预算
+        return {"model": base_model, "max_tokens": base_max_tokens, "fast_ref": False}
+    # 简单/常规意图：若有快模型则切换，并收紧预算实现"快路径"
+    if fast_model:
+        return {"model": fast_model, "max_tokens": base_max_tokens, "fast_ref": True}
+    return {"model": base_model, "max_tokens": base_max_tokens, "fast_ref": False}
 
 
 if __name__ == "__main__":
