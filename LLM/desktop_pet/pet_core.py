@@ -8,7 +8,9 @@
 - pet_status()：进程存活状态
 """
 
+import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -18,9 +20,46 @@ from typing import Dict, List, Optional
 PET_EXE = r"F:\爱丽\A-爱莉-带表情版\Bongo Cat Mver.exe"
 PET_DIR = os.path.dirname(PET_EXE)
 WEBUI_URL = "http://127.0.0.1:8081"   # 主程序 webui（输入框经 /api/send 投 inbox）
+DEFAULT_WINDOW_SIZE = (400, 400)      # 桌宠窗口尺寸；太小会把程序自绘的按键气泡裁掉
+
+_CONFIG_PATH = os.path.join(PET_DIR, "config.json")
 
 _input_proc: Optional[subprocess.Popen] = None
 _pet_proc: Optional[subprocess.Popen] = None
+
+
+def _load_window_size() -> tuple:
+    """从 LLM/skill_worlds.json 的 desktop_pet.window_size 读桌宠窗口尺寸（可调）。"""
+    try:
+        cfg = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "skill_worlds.json")
+        with open(cfg, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        v = data.get("desktop_pet", {}).get("window_size")
+        if isinstance(v, (list, tuple)) and len(v) == 2:
+            return (int(v[0]), int(v[1]))
+    except Exception:
+        pass
+    return DEFAULT_WINDOW_SIZE
+
+
+def _patch_config_window_size(size: tuple) -> Dict:
+    """把桌宠 config.json 的 window_size 文本替换为指定尺寸（该文件含注释，非标准 JSON）。"""
+    if not os.path.exists(_CONFIG_PATH):
+        return {"note": "config.json 不存在"}
+    try:
+        with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+            text = f.read()
+        pat = re.compile(r'("window_size"\s*:\s*\[\s*)\d+(\s*,\s*)\d+(\s*\])',
+                         re.S)
+        new, n = pat.subn(rf"\g<1>{size[0]}\g<2>{size[1]}\g<3>", text)
+        if n == 0:
+            return {"note": "未找到 window_size 字段", "size": list(size)}
+        with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+            f.write(new)
+        return {"patched": True, "window_size": list(size), "count": n}
+    except Exception as e:
+        return {"patched": False, "error": str(e)}
 
 
 def _input_script() -> str:
@@ -56,11 +95,15 @@ def _move_pet_to_bottom_right(timeout_s: float = 6.0) -> Dict:
 def pet_start(webui_url: str = WEBUI_URL, with_input: bool = True) -> Dict:
     """启动桌宠 + 输入框（幂等：已运行则跳过）。
 
-    桌宠大小由 config.json 的 window_size 控制（已默认 300x300）；
+    桌宠窗口尺寸由 skill_worlds.json 的 desktop_pet.window_size 控制
+    （缺省 400x400）；启动前会把该尺寸写入桌宠 config.json，
     启动后自动把窗口移到屏幕右下角。
     """
     global _pet_proc, _input_proc
     result = {"success": True}
+    # 0) 桌宠窗口尺寸（可调；太小会把按键气泡裁掉）
+    size = _load_window_size()
+    result["window_size"] = _patch_config_window_size(size)
     # 1) 桌宠本体
     if _pet_proc is None or _pet_proc.poll() is not None:
         if not os.path.exists(PET_EXE):

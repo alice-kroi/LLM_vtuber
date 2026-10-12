@@ -45,6 +45,7 @@
   "desktop_pet": {
     "enabled": true,
     "pet_exe": "F:/爱丽/A-爱莉-带表情版/Bongo Cat Mver.exe",
-    "webui_url": "http://127.0.0.1:8081"
+    "webui_url": "http://127.0.0.1:8081",
+    "window_size": [400, 400]
   }
 }
