@@ -219,7 +219,9 @@ class VTubeStudioAPI:
                 data={
                     "pluginName": plugin_name,
                     "pluginDeveloper": plugin_developer
-                }
+                },
+                # 认证需要用户在 VTS 弹窗里手动点击授权，2s 默认超时太短，放宽到 30s
+                timeout=30.0
             )
             
             if response:

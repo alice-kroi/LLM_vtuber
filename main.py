@@ -155,6 +155,7 @@ langgraph_manager = None
 live2d_manager = None
 live2d_action_generator = None
 _bili_process = None  # 弹幕监听子进程引用，用于退出时清理
+_sovits_process = None  # GPT-SoVITS v2pro TTS 服务子进程引用，用于退出时清理
 danmu_tts_config = DanmuTtsConfig()
 vision_danmu_config = VisionDanmuConfig()
 cloud_tts_config = None  # 云端 TTS 配置，延迟加载
@@ -186,6 +187,9 @@ _RECENT_MSG_MAX = 2000  # 去重集合上限
 _RECENT_MSG_WINDOW = 5.0  # 去重时间窗口（秒）
 _last_dedup_cleanup = 0.0  # 上次清理时间
 
+# 任务式交互架构开关：默认开启；设 TASK_MANAGER_ENABLED=0 可回退到原同步 operator_worker 路径
+TASK_MANAGER_ENABLED = os.environ.get("TASK_MANAGER_ENABLED", "1") != "0"
+
 # 命令行参数解析
 def parse_args():
     """
@@ -206,12 +210,116 @@ def parse_args():
     parser.add_argument("--room-id", type=int, help="指定哔哩哔哩直播间号")
     parser.add_argument("--danmu-tts", action="store_true", help="启用 AI 读弹幕 TTS")
     parser.add_argument("--vision-danmu", action="store_true", help="启用视觉弹幕")
+    parser.add_argument("--cli", action="store_true",
+                        help="启用 CLI 渠道：从 stdin 输入与主播脑对话（阶段1）")
     return parser.parse_args()
 
 # 异步HTTP服务器处理函数
+async def process_openai_messages(messages):
+    """统一处理 OpenAI 格式消息列表：去重 → 限流 → 奖励 → 入队 → WS/TTS。
+
+    阶段1 抽取：handle_post_request 与 streamer inbox（渠道统一）共用此入口；
+    LangGraph 旧链路（_message_queue → _queue_worker → handle_messages）并行保留。
+    """
+    from fastapi.responses import JSONResponse
+
+    global _recent_message_keys, _last_dedup_cleanup
+    now = time.time()
+    if now - _last_dedup_cleanup > 30:
+        _recent_message_keys.clear()
+        _last_dedup_cleanup = now
+        logger.debug("消息去重集合已清理")
+
+    deduped_messages = []
+    for msg in (messages if isinstance(messages, list) else [messages]):
+        if msg.get("role") == "user":
+            uname = msg.get("name", msg.get("username", "匿名"))
+            content = msg.get("content", "")
+            ts = msg.get("timestamp", 0)
+            if isinstance(ts, float):
+                ts = int(ts)
+            msg_key = f"{uname}|{content}|{ts}"
+            if msg_key in _recent_message_keys:
+                logger.debug(f"[去重] 跳过重复消息: {uname}: {content[:30]}")
+                continue
+            _recent_message_keys.add(msg_key)
+            if len(_recent_message_keys) > _RECENT_MSG_MAX:
+                keys_list = list(_recent_message_keys)
+                _recent_message_keys = set(keys_list[_RECENT_MSG_MAX // 2:])
+        deduped_messages.append(msg)
+    if not deduped_messages:
+        return JSONResponse({"status": "deduped"})
+
+    messages = deduped_messages
+
+    # ============ P0-1 弹幕降噪限流：重要事件(礼物/SC)优先放行，普通弹幕窗口限流 ============
+    try:
+        from broadcast.danmu_filter import danmu_filter
+        kept = []
+        for msg in messages:
+            deliver, _reason = danmu_filter.should_deliver(msg)
+            if not deliver:
+                continue  # 普通弹幕超限 → 归档式丢弃，不喂给 LLM
+            if danmu_filter.is_important(msg):
+                msg = danmu_filter.mark_important(msg)
+            kept.append(msg)
+        messages = kept
+        if not messages:
+            return JSONResponse({"status": "rate_limited"})
+    except Exception as e:
+        logger.debug(f"[P0-1] 弹幕过滤跳过: {e}")
+
+    # ============ 奖励采集：识别弹幕情感/礼物/SC 并打分 ============
+    if learning_available and reward_tracker is not None:
+        try:
+            asyncio.create_task(reward_tracker.on_messages(messages))
+        except Exception as e:
+            logger.debug(f"奖励采集跳过: {e}")
+
+    while _message_queue and _message_queue.qsize() >= _QUEUE_MAX_SIZE:
+        try:
+            _message_queue.get_nowait()
+            _message_queue.task_done()
+            logger.warning(f"消息队列已满({_QUEUE_MAX_SIZE})，丢弃旧消息")
+        except asyncio.QueueEmpty:
+            break
+
+    if _message_queue is not None:
+        await _message_queue.put(_queue_pack(messages))
+        logger.info(f"消息已入队列（当前队列长度: {_message_queue.qsize()}）")
+
+        try:
+            from webui.app import ws_manager, add_message_to_history
+            for msg in (messages if isinstance(messages, list) else [messages]):
+                if msg.get("role") == "user":
+                    name = msg.get("name", "匿名")
+                    content = msg.get("content", "")
+                    await ws_manager.broadcast_danmaku(name, content)
+                    add_message_to_history("danmaku", {"username": name, "content": content})
+                    logger.info(f"WebSocket 已广播弹幕: {name}: {content[:50]}")
+        except ImportError as e:
+            logger.warning(f"WebSocket 广播模块导入失败: {e}")
+        except Exception as e:
+            logger.error(f"WebSocket 广播弹幕失败: {e}")
+
+        # AI 读弹幕 TTS：弹幕到达时异步触发朗读
+        if danmu_tts_service and danmu_tts_config.enabled:
+            try:
+                for msg in (messages if isinstance(messages, list) else [messages]):
+                    if msg.get("role") == "user" and msg.get("source") != "vision":
+                        asyncio.create_task(asyncio.to_thread(
+                            danmu_tts_service.on_danmaku, msg.get("content", "")
+                        ))
+            except Exception as e:
+                logger.error(f"AI读弹幕TTS触发失败: {e}")
+
+    return JSONResponse({"status": "queued"})
+
+
 async def handle_post_request(request):
     """
-    处理POST请求：将消息放入队列串行处理，立即返回响应。
+    处理POST请求：解析外部注入（bili HTTP 回流 / API）为消息列表，
+    统一交给 process_openai_messages 处理（去重/限流/奖励/入队）。
 
     使用队列的原因：Live2D 的 move_to_direction 持有 operation_lock 长达 1.5s，
     TTS 播放也需独占音频设备。若每条弹幕都并发启动 graph.ainvoke，会导致
@@ -231,81 +339,7 @@ async def handle_post_request(request):
         else:
             messages = [request_data]
 
-        global _recent_message_keys, _last_dedup_cleanup
-        now = time.time()
-        if now - _last_dedup_cleanup > 30:
-            _recent_message_keys.clear()
-            _last_dedup_cleanup = now
-            logger.debug("消息去重集合已清理")
-
-        deduped_messages = []
-        for msg in (messages if isinstance(messages, list) else [messages]):
-            if msg.get("role") == "user":
-                uname = msg.get("name", msg.get("username", "匿名"))
-                content = msg.get("content", "")
-                ts = msg.get("timestamp", 0)
-                if isinstance(ts, float):
-                    ts = int(ts)
-                msg_key = f"{uname}|{content}|{ts}"
-                if msg_key in _recent_message_keys:
-                    logger.debug(f"[去重] 跳过重复消息: {uname}: {content[:30]}")
-                    continue
-                _recent_message_keys.add(msg_key)
-                if len(_recent_message_keys) > _RECENT_MSG_MAX:
-                    keys_list = list(_recent_message_keys)
-                    _recent_message_keys = set(keys_list[_RECENT_MSG_MAX // 2:])
-            deduped_messages.append(msg)
-        if not deduped_messages:
-            return JSONResponse({"status": "deduped"})
-
-        messages = deduped_messages
-
-        # ============ 奖励采集：识别弹幕情感/礼物/SC 并打分 ============
-        if learning_available and reward_tracker is not None:
-            try:
-                asyncio.create_task(reward_tracker.on_messages(messages))
-            except Exception as e:
-                logger.debug(f"奖励采集跳过: {e}")
-
-        while _message_queue and _message_queue.qsize() >= _QUEUE_MAX_SIZE:
-            try:
-                _message_queue.get_nowait()
-                _message_queue.task_done()
-                logger.warning(f"消息队列已满({_QUEUE_MAX_SIZE})，丢弃旧消息")
-            except asyncio.QueueEmpty:
-                break
-
-        if _message_queue is not None:
-            await _message_queue.put(messages)
-            logger.info(f"消息已入队列（当前队列长度: {_message_queue.qsize()}）")
-
-            try:
-                from webui.app import ws_manager, add_message_to_history
-                for msg in (messages if isinstance(messages, list) else [messages]):
-                    if msg.get("role") == "user":
-                        name = msg.get("name", "匿名")
-                        content = msg.get("content", "")
-                        await ws_manager.broadcast_danmaku(name, content)
-                        add_message_to_history("danmaku", {"username": name, "content": content})
-                        logger.info(f"WebSocket 已广播弹幕: {name}: {content[:50]}")
-            except ImportError as e:
-                logger.warning(f"WebSocket 广播模块导入失败: {e}")
-            except Exception as e:
-                logger.error(f"WebSocket 广播弹幕失败: {e}")
-
-            # AI 读弹幕 TTS：弹幕到达时异步触发朗读
-            if danmu_tts_service and danmu_tts_config.enabled:
-                try:
-                    for msg in (messages if isinstance(messages, list) else [messages]):
-                        if msg.get("role") == "user" and msg.get("source") != "vision":
-                            asyncio.create_task(asyncio.to_thread(
-                                danmu_tts_service.on_danmaku, msg.get("content", "")
-                            ))
-                except Exception as e:
-                    logger.error(f"AI读弹幕TTS触发失败: {e}")
-
-        return JSONResponse({"status": "queued"})
-
+        return await process_openai_messages(messages)
     except Exception as e:
         logger.error(f"处理HTTP请求失败: {e}")
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
@@ -330,6 +364,147 @@ async def handle_messages(messages):
     await langgraph_manager.run_with_messages(initial_state)
 
 
+# ============================================================
+# P0-2 队列投递水位 + 停滞自检 + 重启补投（借鉴 Cortico lastDeliveredCursor）
+# ============================================================
+_QUEUE_META_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+_QUEUE_META_FILE = os.path.join(_QUEUE_META_DIR, "queue_meta.json")
+_queue_seq = 0                 # 已入队单调序号（投递水位用）
+_queue_delivered = 0           # 投递水位：已成功处理的最大 seq
+_queue_item_meta = {}          # seq -> {"ts": float, "messages": list}（保留近期未交付项）
+_QUEUE_STALL_S = float(os.environ.get("QUEUE_STALL_S", "300"))   # 停滞阈值：待处理最老消息超过此秒数 → 告警（只报不自动修）
+_QUEUE_AUDIT_INTERVAL_S = float(os.environ.get("QUEUE_AUDIT_INTERVAL_S", "120"))
+_QUEUE_STALL_WARNED_SEQ = None
+_QUEUE_META_RETAIN = 400
+
+
+def _queue_pack(messages):
+    """为入队消息分配 seq 并记录元数据（供补投/水位）。返回 (seq, ts, messages)。"""
+    global _queue_seq
+    _queue_seq += 1
+    _queue_item_meta[_queue_seq] = {"ts": time.time(), "messages": messages}
+    # 防止元数据无限膨胀，只保留最近项
+    if len(_queue_item_meta) > _QUEUE_META_RETAIN:
+        for k in sorted(_queue_item_meta)[:_QUEUE_META_RETAIN // 2]:
+            _queue_item_meta.pop(k, None)
+    return (_queue_seq, _queue_item_meta[_queue_seq]["ts"], messages)
+
+
+def _queue_persist_meta():
+    """持久化投递水位 + 未交付项（补投基线）。仅保留 seq>交付的项。"""
+    try:
+        undelivered = [{"seq": s, "ts": m["ts"], "messages": m["messages"]}
+                       for s, m in _queue_item_meta.items() if s > _queue_delivered]
+        os.makedirs(_QUEUE_META_DIR, exist_ok=True)
+        with open(_QUEUE_META_FILE, "w", encoding="utf-8") as f:
+            json.dump({"delivered": _queue_delivered, "undelivered": undelivered[-200::]},
+                      f, ensure_ascii=False)
+    except Exception as e:
+        logger.debug(f"[P0-2] 水位持久化失败: {e}")
+
+
+def _queue_load_meta():
+    try:
+        with open(_QUEUE_META_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _queue_restore_undelivered():
+    """启动时补投水位之后仍未处理的消息（借鉴 Cortico requeueUndelivered）。"""
+    global _queue_delivered
+    global _queue_seq
+    meta = _queue_load_meta()
+    if not meta:
+        return
+    _queue_delivered = int(meta.get("delivered", 0))
+    to_readd = [u for u in meta.get("undelivered", []) if int(u["seq"]) > _queue_delivered]
+    if not to_readd:
+        return
+    for u in sorted(to_readd, key=lambda x: int(x["seq"])):
+        seq = int(u["seq"])
+        _queue_seq = max(_queue_seq, seq)
+        _queue_item_meta[seq] = {"ts": u.get("ts", time.time()), "messages": u["messages"]}
+    logger.info(f"[P0-2] 重启补投: 水位={_queue_delivered}，补投 {len(to_readd)} 条未处理消息")
+    for u in sorted(to_readd, key=lambda x: int(x["seq"])):
+        try:
+            _message_queue.put_nowait((int(u["seq"]), u.get("ts", time.time()), u["messages"]))
+        except asyncio.QueueFull:
+            logger.warning("[P0-2] 补投队列已满，丢弃最旧")
+            break
+
+
+async def _audit_queue_stall():
+    """定期自检队列停滞：最老待处理消息超过阈值 → 仅告警不自动修复（诚实认知论）。"""
+    global _QUEUE_STALL_WARNED_SEQ
+    while True:
+        await asyncio.sleep(_QUEUE_AUDIT_INTERVAL_S)
+        try:
+            pending = {s: m for s, m in _queue_item_meta.items() if s > _queue_delivered}
+            pending_items = sorted(pending.items())  # (seq, {ts, messages}) 按 seq 有序
+            if not pending_items:
+                _QUEUE_STALL_WARNED_SEQ = None
+                continue
+            oldest_seq, oldest_meta = pending_items[0]
+            oldest_age = time.time() - oldest_meta["ts"]
+            behind = len(pending_items)
+            if oldest_age > _QUEUE_STALL_S and _QUEUE_STALL_WARNED_SEQ != oldest_seq:
+                _QUEUE_STALL_WARNED_SEQ = oldest_seq
+                sample = ""
+                try:
+                    msg0 = oldest_meta["messages"][-1]
+                    if isinstance(msg0, dict):
+                        sample = str(msg0.get("content", ""))[:80]
+                except Exception:
+                    pass
+                logger.error(
+                    f"[P0-2] 投递水位停滞: 最老未处理消息已等待 {oldest_age:.0f}s"
+                    f"(>{_QUEUE_STALL_S:.0f}s)，积压 {behind} 条。水位={_queue_delivered}，"
+                    f"oldest={sample}"
+                )
+        except Exception as e:
+            logger.debug(f"[P0-2] 停滞自检异常: {e}")
+
+
+# ============================================================
+# 任务式交互架构：TaskManager 进度 / 完成回调
+# ============================================================
+def _on_task_progress(task):
+    """任务进展回调（TaskManager 后台操作脑每轮工具后触发）。仅记录日志；
+    实时广播 task_update 已由 task_manager._ws_broadcast 完成。"""
+    logger.info(f"[TaskManager·进展] {task.task_id} {task.progress:.0%} - {task.message}")
+
+
+async def _on_task_done(task):
+    """任务完成回调：把操作结果通过消息队列回灌给主播，由主播组织播报（不触碰 Live2D/TTS 锁）。"""
+    try:
+        # 若主播已在当轮顺路播报（result_reported=True），则不重复回灌
+        if getattr(task, "result_reported", False):
+            logger.info(f"[TaskManager] 任务 {task.task_id} 结果已由主播顺路播报，跳过回灌")
+            return
+        summary = (task.result or {}).get("summary") or (task.result or {}).get("result") or task.message or ""
+        done = task.status.value == "done"
+        broadcast_msg = {
+            "role": "user",
+            "name": "系统",
+            "source": "operator_broadcast",
+            "content": (
+                f"【系统播报】刚才的电脑操作任务已完成{bool(done)}。"
+                f"结果：{summary} 请用你的主播语气向观众简要播报这个结果。"
+            ),
+            "timestamp": time.time() + 2.0,  # 错开去重时间窗
+        }
+        global _message_queue
+        if _message_queue is not None:
+            await _message_queue.put(_queue_pack([broadcast_msg]))
+            logger.info(f"[TaskManager·完成] 任务 {task.task_id} 完成，回灌主播播报: {summary[:40]}")
+        else:
+            logger.warning("[TaskManager·完成] 消息队列未就绪，跳过结果播报回灌")
+    except Exception as e:
+        logger.error(f"[TaskManager·完成] 播报回灌异常: {e}")
+
+
 async def _queue_worker():
     """
     队列工作协程：串行处理消息，避免 Live2D/TTS 并发冲突。
@@ -338,11 +513,27 @@ async def _queue_worker():
     确保operation_lock不会因并发争抢而卡死，TTS音频也不会重叠播放。
     """
     logger.info("消息队列 worker 已启动")
+    _last_persist = 0.0
     while True:
         try:
-            messages = await _message_queue.get()
+            item = await _message_queue.get()
+            # 兼容两种负载：_queue_pack 的 (seq, ts, messages)，或 webui 直接 put 的裸 list
+            if isinstance(item, tuple) and len(item) == 3:
+                seq, ts, messages = item
+            else:
+                seq, messages = None, item
+                ts = time.time()
             logger.info(f"从队列取出消息处理（剩余队列长度: {_message_queue.qsize()}）")
             await handle_messages(messages)
+            # 处理成功 → 推进投递水位并持久化（节流）
+            if seq is not None:
+                global _queue_delivered
+                if seq > _queue_delivered:
+                    _queue_delivered = seq
+                now = time.time()
+                if now - _last_persist > 2.0:
+                    _last_persist = now
+                    _queue_persist_meta()
         except asyncio.CancelledError:
             logger.info("消息队列 worker 被取消")
             break
@@ -818,7 +1009,10 @@ class LangGraphManager:
         self.graph.add_node("load_memory", self._load_memory_node)
         self.graph.add_node("rag_retrieval", self._rag_retrieval_node)
         self.graph.add_node("context_control", self._context_control_node)
-        self.graph.add_node("llm_process", self._llm_process_node)
+        self.graph.add_node("streamer_request", self._streamer_request_node)  # 主播首轮：同步情感+操作请求给主体
+        self.graph.add_node("supervisor", self._supervisor_node)              # 主体思维：信息交换中枢
+        self.graph.add_node("operator_worker", self._operator_worker_node)    # 操作思维
+        self.graph.add_node("streamer_worker", self._llm_process_node)        # 主播末轮：最终回复+广播+后处理
         self.graph.add_node("finalize", self._finalize_node)
 
         # 注意: rag_save/save_memory/live2d/tts 不再作为图节点，
@@ -828,25 +1022,49 @@ class LangGraphManager:
         # - live2d_action_node:   Live2D动作（目光/嘴巴）
         # - tts_node/cloud_tts_node: TTS合成与播放
 
-        # 添加边：init → load_memory → rag_retrieval → [context_control] → llm_process → finalize
-        # 优化2.1A: llm_process 后直接进入 finalize，后处理（rag_save/save_memory/live2d/tts）改为并行执行
+        # 配置三脑架构的共享状态更新规则（修正信息流模型）
+        # 添加边：init → load_memory → rag_retrieval → [context_control] → streamer_request
+        #        streamer_request → supervisor
+        #        supervisor →(有操作请求)→ operator_worker → streamer_worker
+        #        supervisor →(无操作请求)→ streamer_worker
+        #        streamer_worker → finalize（后处理并行执行）
+        #
+        # 信息流（符合主播/主体/操作三脑模型）：
+        #   主播(streamer_request) 产出情感+操作请求 → 主体(supervisor) 接收并路由
+        #   → 操作(operator_worker) 领取指令执行并回报 → 主播(streamer_worker) 组织最终话术
         self.graph.add_edge(START, "init")
         self.graph.add_edge("init", "load_memory")
         self.graph.add_edge("load_memory", "rag_retrieval")
 
         if enable_context_control:
             self.graph.add_edge("rag_retrieval", "context_control")
-            self.graph.add_edge("context_control", "llm_process")
+            self.graph.add_edge("context_control", "streamer_request")
         else:
-            self.graph.add_edge("rag_retrieval", "llm_process")
+            self.graph.add_edge("rag_retrieval", "streamer_request")
+        self.graph.add_edge("streamer_request", "supervisor")
 
-        # 优化2.1A: llm_process → finalize，后处理通过 asyncio.create_task 并行执行
-        self.graph.add_edge("llm_process", "finalize")
+        # 条件路由：主体根据主播是否有操作请求决定下一节点
+        def _route_after_supervisor(state: LLMState) -> str:
+            # 任务式交互架构：操作已后台异步执行，主播恒走 streamer_worker 立即回复"处理中"。
+            # 回退开关 TASK_MANAGER_ENABLED=0 时，恢复原同步 operator_worker 路径。
+            if os.environ.get("TASK_MANAGER_ENABLED", "1") != "0":
+                return "streamer_worker"
+            return "operator_worker" if state.get("routed_to") == "operator" else "streamer_worker"
+
+        self.graph.add_conditional_edges(
+            "supervisor", _route_after_supervisor,
+            {"operator_worker": "operator_worker", "streamer_worker": "streamer_worker"},
+        )
+        # 操作完成后必须回到主播脑组织最终话术
+        self.graph.add_edge("operator_worker", "streamer_worker")
+
+        # 优化2.1A: streamer_worker → finalize，后处理通过 asyncio.create_task 并行执行
+        self.graph.add_edge("streamer_worker", "finalize")
 
         # 编译图
         self.graph = self.graph.compile(checkpointer=self.checkpointer)
 
-        logger.info("LangGraph 图结构构建完成")
+        logger.info("LangGraph 图结构构建完成（三脑: streamer_request→supervisor→operator/streamer→finalize）")
 
         # ============ 初始化自主学习模块 ============
         if learning_available:
@@ -1111,8 +1329,13 @@ class LangGraphManager:
                 logger.debug(f"[流式] 首字推送失败: {e}")
 
         def _cb(text):
+            # P0-A：LLM 调用已改到线程池(to_thread)，此回调可能在子线程触发，
+            # 用 call_soon_threadsafe 调度回主事件循环创建 task（保证线程安全）。
             try:
-                asyncio.create_task(_push(text))
+                _loop = asyncio.get_event_loop()
+                _loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(_push(text))
+                )
             except Exception:
                 pass
         return _cb
@@ -1188,6 +1411,50 @@ class LangGraphManager:
             state["context_controlled"] = False
             return state
 
+    # ============ 三脑架构节点（主体/操作/主播） ============
+
+    async def _streamer_request_node(self, state: LLMState) -> LLMState:
+        """
+        主播思维（Streamer）首轮：感知用户意图，把「情感 + 需要的电脑操作」同步给主体。
+        - 判断用户问题是否需要操作电脑 → 写 streamer_operation_request（供主体路由）
+        - 提取基础情感标记 → 写 streamer_emotion（供主体/后续 Live2D）
+        真正的主播话术由 streamer_worker（_llm_process_node）在主体调度后生成。
+        """
+        question = state.get("question") or ""
+        if not question:
+            um = _extract_last_user_message(state)
+            question = (um.get("content", "") if um else "")
+
+        # 1. 判断是否需要电脑操作（规则：含操作意图关键词）
+        from LLM.LLM_node import _is_operator_intent
+        # 【系统播报】为"操作完成播报"回灌消息：主播只需组织播报，绝不二次触发操作任务（防重复执行）
+        is_broadcast = question.startswith("【系统播报】")
+        need_op = False if is_broadcast else _is_operator_intent(question)
+        state["streamer_operation_request"] = question if need_op else ""
+        # 对操作请求提升轮次上限
+        if need_op:
+            current = state.get("max_rounds") or 4
+            state["max_rounds"] = max(current, 10)
+
+        # 2. 基础情感标记（默认普通；后续由 _llm_process_node 输出的 tone 覆盖）
+        state["streamer_emotion"] = state.get("streamer_emotion") or "普通"
+
+        logger.info(
+            f"[主播思维·首轮] 感知='{question[:30]}' → 操作请求={'有' if need_op else '无'}, "
+            f"情感={state.get('streamer_emotion')}"
+        )
+        return state
+
+    async def _supervisor_node(self, state: LLMState) -> LLMState:
+        """主体思维（Supervisor）节点：路由主播/操作，中转指令。薄封装 LLM_node.supervisor_route_node。"""
+        from LLM.LLM_node import supervisor_route_node
+        return await supervisor_route_node(state)
+
+    async def _operator_worker_node(self, state: LLMState) -> LLMState:
+        """操作思维（Operator）节点：执行真实电脑操作。薄封装 LLM_node.operator_worker_node。"""
+        from LLM.LLM_node import operator_worker_node
+        return await operator_worker_node(state)
+
     async def _llm_process_node(self, state: LLMState) -> LLMState:
         """LLM 处理节点：调用大模型生成响应并解析格式"""
         logger.info("执行 LLM 处理节点")
@@ -1238,11 +1505,60 @@ class LangGraphManager:
                 except Exception as e:
                     logger.debug(f"情绪节奏跳过: {e}")
 
+            # ============ 三脑：主播读取主体转交的中枢信息（操作结果/桌面情况）============
+            # 这是主播(streamer_worker)唯一从主体(supervisor)/操作(operator)取信息的接口。
+            # 无论 context_controlled 是否启用，都显式注入 system_prompt，保证操作结果/桌面
+            # 情况始终能到达主播（不依赖 RAG context 拼接，避免被裁剪丢弃）。
+            core_info_parts = []
+            # 1) 操作结果（主体经 operator_worker 写入的 core_message / operator_result）
+            if state.get("operator_result"):
+                _op = state["operator_result"]
+                _sum = state.get("operator_summary") or _op.get("summary") or ""
+                _res = _op.get("result") or ""
+                core_info_parts.append(
+                    f"[主体转达-操作结果] 已完成{state.get('operator_completed', False)}。"
+                    f"简述:{_sum} 详情:{_res}"
+                )
+                # 2) 桌面情况（主体维护的 desktop_snapshot）——仅在操作流程中随结果一起转达
+                _ds = state.get("desktop_snapshot") or {}
+                if _ds.get("windows"):
+                    _wins = "、".join(_ds["windows"][:10])
+                    core_info_parts.append(f"[主体转达-桌面情况] 当前可见窗口:{_wins}"
+                                           f"（共{_ds.get('count', len(_ds['windows']))}个）")
+            elif state.get("core_message"):
+                core_info_parts.append(f"[主体转达] {state.get('core_message')}")
+            if core_info_parts:
+                core_info_block = "\n".join(core_info_parts)
+                system_prompt = (
+                    f"{system_prompt}\n\n===== 主体中枢转达的信息（供你组织回复参考）=====\n"
+                    f"{core_info_block}\n"
+                    f"=============================="
+                )
+                logger.info(f"[主播·中枢信息] 已注入主体转达 {len(core_info_parts)} 段: "
+                            f"{core_info_parts[0][:50]}")
+
+            # 任务式架构(F2)：任务已后台派发 → 主播本轮只应输出自然的"受理/进度"话术，
+            # 强约束不要调用/提到任何工具名，避免模型把待办操作输出成工具名（如"os_list_windows"）。
+            if TASK_MANAGER_ENABLED and state.get("task_id"):
+                system_prompt = (
+                    f"{system_prompt}\n\n"
+                    f"[后台任务受理提示] 用户请求的电脑操作已作为后台任务正在执行，操作结果完成后会另行通报。"
+                    f"你现在只需用自然、口语化的中文向观众反馈『好的，我在处理/正在查看，稍等哦』之类的受理话术。"
+                    f"绝对不要调用任何工具，也绝对不要输出工具名或JSON代码。"
+                )
+
             # 如果上下文控制已启用，RAG 上下文已整合到 messages 中，不再需要单独拼接
             context_controlled = state.get("context_controlled", False)
             llm_context = None if context_controlled else state.get("context")
 
             # 构建LLM状态
+            # 关键修复(E1)：若操作脑已完成操作(operation_status=="done")，主播末轮关闭抗幻觉守卫，避免二次执行 os。
+            # 任务式架构修复(F1)：任务已后台派发(task_id 非空)时，主播本轮只负责"受理/进度"话术，
+            # 绝不调用电脑操作工具（否则与后台操作脑同时操作桌面 → 重复/冲突）。
+            disable_streamer_tools = (
+                bool(state.get("operation_status") == "done")
+                or (TASK_MANAGER_ENABLED and bool(state.get("task_id")))
+            )
             llm_state = LLMState(
                 messages=state.get("messages", []),
                 system_prompt=system_prompt,
@@ -1254,6 +1570,7 @@ class LangGraphManager:
                 name=user_message.get("name"),
                 # P0：首字流式回调 —— LLM 首个内容到达即推送到 WebSocket（首字优先）
                 on_stream_first=self._make_first_token_push(),
+                skip_operation_guard=disable_streamer_tools,
             )
 
             # 根据是否有上下文选择不同节点（均为 async 调用）
@@ -1275,6 +1592,8 @@ class LangGraphManager:
             state["content"] = parsed["content"]
             state["visual_focus"] = parsed["visual_focus"]
             state["mouth_state"] = parsed["mouth_state"]
+            # 三脑：把主播最终情感回写到共享状态（供主体/后续 Live2D/情绪节奏读取）
+            state["streamer_emotion"] = parsed["tone"]
 
             # ============ 情绪节奏：记录本次使用的语气 ============
             if learning_available and emotion_pacer is not None:
@@ -1664,6 +1983,19 @@ class LangGraphManager:
         state.setdefault("temperature", DEFAULT_TEMPERATURE)
         state.setdefault("max_tokens", DEFAULT_MAX_TOKENS)
         state.setdefault("messages", [])
+
+        # 三脑架构：每轮初始清零操作/路由残留字段（防持久会话跨轮次污染 P-A），
+        # 并重置 max_rounds（防上一轮提升后污染本轮 P-D）。
+        for _field in ("routed_to", "operator_result", "operator_summary",
+                       "desktop_snapshot", "core_message", "operator_instruction",
+                       "task_id", "task_info"):
+            state.pop(_field, None)
+        state["operator_completed"] = False
+        state["operation_status"] = "idle"
+        state["max_rounds"] = 4
+        # 主播首轮会重新写入真实情感/操作请求
+        state.setdefault("streamer_emotion", "普通")
+        state.setdefault("streamer_operation_request", "")
 
         return state
 
@@ -2091,8 +2423,15 @@ async def start_http_server(port=8081):
     # 初始化 API 模块（注入 config 引用）
     init_api(config=_config, config_path=_config_path)
 
-    # 使用 uvicorn 启动服务器
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+    # 使用 uvicorn 启动服务器（P0-C：默认绑定 127.0.0.1，防局域网远程注入；可配置 [webui] host 覆盖）
+    _listen_host = "127.0.0.1"
+    try:
+        _wcfg = configparser.ConfigParser(interpolation=None)
+        _wcfg.read(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini"), encoding='utf-8')
+        _listen_host = _wcfg.get("webui", "host", fallback="127.0.0.1").strip() or "127.0.0.1"
+    except Exception:
+        pass
+    config = uvicorn.Config(app, host=_listen_host, port=port, log_level="info")
     server = uvicorn.Server(config)
 
     # 在后台任务中启动（不阻塞主事件循环）
@@ -2104,24 +2443,14 @@ async def start_http_server(port=8081):
 
     return server
 
-def start_bilibili_listener(room_id=None):
-    """
-    启动哔哩哔哩直播监听程序（使用 bili_main.py 常驻监听，替换原 sample.py 仅5秒演示）
-
-    bili_main.py 特性：
-    - 自动读取 config.json 的 ROOM_IDS / output_port
-    - 连接断开自动指数退避重连
-    - 弹幕/礼物/SC 去重后 HTTP POST 到主程序 (127.0.0.1:<output_port>/)
-
-    Args:
-        room_id: 直播间号；若指定则写入 config.json 覆盖默认
-    """
+def _start_bili_legacy(room_id=None):
+    """旧路径：Popen 启动 broadcast/bili_main.py 子进程（bili 域激活失败时回退）。"""
     import subprocess
-    import sys
+    import sys as _sys
 
     broadcast_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "broadcast")
     script_path = os.path.join(broadcast_dir, "bili_main.py")
-    cmd = [sys.executable, script_path]
+    cmd = [_sys.executable, script_path]
 
     # 如果指定了房间号，修改config.json
     if room_id is not None:
@@ -2149,6 +2478,132 @@ def start_bilibili_listener(room_id=None):
         )
     except Exception as e:
         logger.error(f"启动弹幕监听器失败: {e}")
+
+
+async def _start_bili_domain(room_id=None):
+    """阶段0：激活 bili 能力域并启动监听（bili_start 工具）；失败回退旧路径。"""
+    try:
+        from LLM.skill_world import skill_assembly
+        from tool.tool_node import tool_registry, ToolCall
+        await skill_assembly.start_world("bili")
+        args_ = {"room_ids": [room_id]} if room_id is not None else {}
+        r = await tool_registry.execute_tool(
+            ToolCall(tool_call_id="bili_start_auto", name="bili_start",
+                     arguments=args_), timeout=60)
+        # execute_tool → {"result": {"result": {引擎回执}, "id": N}}，success 在最内层
+        inner = (r or {}).get("result", {}) if isinstance(r, dict) else {}
+        engine = inner.get("result", {}) if isinstance(inner, dict) else {}
+        ok = bool(engine.get("success")) if isinstance(engine, dict) else False
+        logger.info(f"bili 域已激活，监听启动: success={ok} {str(r)[:120]}")
+        if not ok:
+            logger.warning(f"bili_start 未成功，回退旧 bili_main.py: {r}")
+            _start_bili_legacy(room_id)
+    except Exception as e:
+        logger.warning(f"bili 域激活失败，回退旧 bili_main.py: {e}")
+        _start_bili_legacy(room_id)
+
+
+def start_bilibili_listener(room_id=None):
+    """
+    启动哔哩哔哩直播监听。
+
+    阶段0（扩展化）：优先激活 bili 能力域（LLM/bili，blivedm 监听 + HTTP 回流），
+    失败则回退旧 broadcast/bili_main.py 子进程。
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        loop.create_task(_start_bili_domain(room_id))
+        return
+    _start_bili_legacy(room_id)
+
+
+def start_sovits_server(host="127.0.0.1", port=9880, sovits_dir=""):
+    """
+    托管拉起 GPT-SoVITS v2pro TTS 服务（api_v2.py 子进程）。
+
+    与弹幕监听器同款模式：独立子进程常驻 9880，退出时由 main 统一清理。
+    若 9880 已被占用（服务已在跑），则不重复拉起。
+    """
+    import subprocess
+    import sys as _sys
+
+    global _sovits_process
+    if _sovits_process and _sovits_process.poll() is None:
+        logger.info("GPT-SoVITS v2pro 服务已在运行，跳过拉起")
+        return True
+
+    # 定位 v2pro 项目目录：程序代码保存在本项目内（junction 将权重大文件
+    # 链到 D 盘，不占项目磁盘），因此优先项目内目录；项目内不存在时回退
+    # 用户本机原目录，兼容旧部署
+    base = os.path.dirname(os.path.abspath(__file__))
+    sovits_dir = sovits_dir or os.environ.get("SOVITS_DIR", "")
+    if not sovits_dir:
+        _local_dir = os.path.join(base, "GPT-SoVITS-v2pro")
+        _orig_dir = r"D:\Github\GPT-SoVITS-v2pro-20250604"
+        sovits_dir = _local_dir if os.path.isfile(
+            os.path.join(_local_dir, "api_v2.py")) else _orig_dir
+    api_script = os.path.join(sovits_dir, "api_v2.py")
+    runtime_py = os.path.join(sovits_dir, "runtime", "python.exe")
+    if not os.path.isfile(api_script):
+        logger.error(f"[sovits] 找不到 api_v2.py: {api_script}")
+        return False
+
+    # 若端口已被占用（外部已起服务），直接视为成功
+    try:
+        import socket
+        with socket.create_connection((host, port), timeout=0.5):
+            logger.info(f"[sovits] 端口 {port} 已有服务，复用")
+            return True
+    except Exception:
+        pass
+
+    # 选择解释器：优先 runtime/python.exe，否则当前 sys.executable
+    python = runtime_py if os.path.isfile(runtime_py) else _sys.executable
+    config_path = os.path.join("GPT_SoVITS", "configs", "tts_infer.yaml")
+    cmd = [python, api_script, "-a", host, "-p", str(port), "-c", config_path]
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([sovits_dir,
+                                         os.path.join(sovits_dir, "GPT_SoVITS")])
+
+    logger.info(f"[sovits] 托管拉起 TTS 服务: {' '.join(cmd)}  cwd={sovits_dir}")
+    try:
+        _sovits_process = subprocess.Popen(
+            cmd,
+            cwd=sovits_dir,
+            env=env,
+            stdout=None,
+            stderr=None,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+        )
+        logger.info(f"[sovits] GPT-SoVITS v2pro 服务已拉起 (PID={_sovits_process.pid})")
+        return True
+    except Exception as e:
+        logger.error(f"[sovits] 拉起失败: {e}")
+        _sovits_process = None
+        return False
+
+
+def stop_sovits_server():
+    """停止托管拉起的 v2pro TTS 子进程。"""
+    global _sovits_process
+    if _sovits_process is not None:
+        try:
+            if _sovits_process.poll() is None:
+                _sovits_process.terminate()
+                try:
+                    _sovits_process.wait(timeout=3)
+                except Exception:
+                    _sovits_process.kill()
+                    _sovits_process.wait(timeout=1)
+            logger.info("GPT-SoVITS v2pro 服务已停止")
+        except Exception as e:
+            logger.error(f"[sovits] 停止失败: {e}")
+        finally:
+            _sovits_process = None
 
 
 def _cleanup_port(port: int):
@@ -2289,6 +2744,28 @@ def main():
         args.tts = _cfg.getboolean("tts", "enabled", fallback=False)
         if args.tts:
             logger.info("TTS 已从 config.ini 启用")
+
+    # 托管拉起 GPT-SoVITS v2pro 服务：当本地 TTS 启用且引擎为 sovits_v2pro 时
+    if args.tts:
+        try:
+            _engine = _cfg.get("tts", "engine", fallback="auto").strip().lower()
+        except Exception:
+            _engine = "auto"
+        if _engine in ("auto", "sovits_v2pro"):
+            # 托管拉起：程序代码在项目内（junction 链大权重到 D 盘），项目内优先
+            sovits_dir = os.environ.get("SOVITS_DIR", "")
+            if not sovits_dir:
+                _local_dir = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "GPT-SoVITS-v2pro")
+                _orig_dir = r"D:\Github\GPT-SoVITS-v2pro-20250604"
+                sovits_dir = _local_dir if os.path.isfile(
+                    os.path.join(_local_dir, "api_v2.py")) else _orig_dir
+            if os.path.isfile(os.path.join(sovits_dir, "api_v2.py")):
+                start_sovits_server(host=_cfg.get("tts", "host", fallback="127.0.0.1"),
+                                    port=_cfg.getint("tts", "port", fallback=9880),
+                                    sovits_dir=sovits_dir)
+            else:
+                logger.info("[sovits] 未检测到 GPT-SoVITS-v2pro，跳过托管拉起")
 
     # 加载云端 TTS 配置
     global cloud_tts_config
@@ -2490,6 +2967,55 @@ def main():
         _message_queue = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
         _queue_worker_task = asyncio.create_task(_queue_worker())
 
+        # 阶段1：初始化主播脑统一收件箱（渠道标准化 → 旧 LangGraph 链路）
+        try:
+            from LLM.streamer.inbox import init_inbox
+            init_inbox(process_openai_messages)
+            logger.info("[Streamer] 统一收件箱已初始化（legacy=旧LangGraph链路）")
+        except Exception as e:
+            logger.warning(f"[Streamer] 收件箱初始化失败（不影响旧链路）: {e}")
+
+        # 阶段2：绑定门面层编排器（STREAMER_NEW=1 时 streamer_ingress 用它进 LangGraph）
+        try:
+            from LLM.streamer.streamer_brain import get_streamer_front
+            get_streamer_front().bind_orchestrator(handle_messages)
+            logger.info("[Streamer] 门面层编排器已绑定（handle_messages）")
+        except Exception as e:
+            logger.warning(f"[Streamer] 门面层编排器绑定失败: {e}")
+
+        # 阶段1：CLI 渠道（--cli 时从 stdin 读用户输入投收件箱）
+        if args and getattr(args, "cli", False):
+            try:
+                from LLM.streamer.cli_channel import start_cli_channel
+                asyncio.create_task(start_cli_channel())
+                logger.info("[Streamer] CLI 渠道已启动（stdin 输入可对话）")
+            except Exception as e:
+                logger.warning(f"[Streamer] CLI 渠道启动失败: {e}")
+
+        # P0-2：启动时补投重启前未处理消息 + 启动投递水位停滞自检
+        try:
+            _queue_restore_undelivered()
+            asyncio.create_task(_audit_queue_stall())
+        except Exception as e:
+            logger.warning(f"[P0-2] 队列补投/自检启动失败: {e}")
+
+        # 任务式交互架构：绑定 TaskManager 进度/完成回调（操作后台执行，完成后回灌主播播报）
+        if TASK_MANAGER_ENABLED:
+            try:
+                from LLM.task_manager import task_manager
+                task_manager.bind_callbacks(on_progress=_on_task_progress, on_done=_on_task_done)
+                logger.info("[TaskManager] 已绑定进度/完成回调")
+            except Exception as e:
+                logger.warning(f"[TaskManager] 回调绑定失败: {e}")
+
+        # P2-1：启动所有激活能力域的生命周期钩子（如重资源域的进程/连接）
+        try:
+            from LLM.skill_world import skill_assembly
+            await skill_assembly.start_all()
+            logger.info("[SkillWorld] 能力域生命周期钩子已全部启动")
+        except Exception as e:
+            logger.warning(f"[SkillWorld] 能力域生命周期钩子启动失败: {e}")
+
         # 初始化 AI 读弹幕 TTS 服务
         if danmu_tts_available and danmu_tts_config.enabled:
             try:
@@ -2556,6 +3082,9 @@ def main():
                 except Exception as e:
                     logger.warning(f"终止弹幕监听子进程失败: {e}")
                 _bili_process = None
+
+            # 终止 GPT-SoVITS v2pro TTS 服务子进程
+            stop_sovits_server()
 
             # 取消队列 worker
             if _queue_worker_task and not _queue_worker_task.done():

@@ -1,0 +1,45 @@
+{
+  "pvz": {
+    "enabled": false,
+    "executable": "D:/steam/steamapps/common/Plants Vs Zombies/PlantsVsZombies.exe",
+    "offsets_profile": "steam-1.2.0.1096",
+    "poll_hz": 15,
+    "action_timeout_ms": 5000
+  },
+  "launcher": {
+    "enabled": true,
+    "mumu_instances": [
+      0,
+      1
+    ]
+  },
+  "desktop_agent": {
+    "enabled": true
+  },
+  "bili": {
+    "enabled": true,
+    "room_ids": [],
+    "sessdata_env": "BILIBILI_SESSDATA",
+    "forward_http": true,
+    "buffer_size": 200
+  },
+  "streamer": {
+    "enabled": true,
+    "mode": "legacy",
+    "persona": {
+      "name": "小鹿",
+      "tone": "活泼",
+      "tail": "～",
+      "greeting": "嘿嘿，"
+    },
+    "session": {
+      "max_history": 20,
+      "expire_min": 60
+    },
+    "small_model": {
+      "enabled": true,
+      "model": "D:/models/qwen2.5-0.5b-instruct",
+      "max_new_tokens": 96
+    }
+  }
+}

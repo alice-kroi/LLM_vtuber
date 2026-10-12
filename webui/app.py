@@ -179,6 +179,21 @@ class WebSocketManager:
     async def broadcast_log(self, log_entry: Dict[str, Any]):
         await self.broadcast("log", log_entry, "log")
 
+    async def broadcast_task(self, task, event: str = "task_update"):
+        """任务式交互架构：广播后台任务进展/结果到 WebSocket。
+
+        event: task_update(进展) / task_done(完成, 含 result) / task_failed(失败, 含 error)
+        task: LLM.task_manager.Task 对象（含 to_broadcast()）或 dict
+        """
+        if hasattr(task, "to_broadcast"):
+            data = task.to_broadcast()
+        elif isinstance(task, dict):
+            data = dict(task)
+        else:
+            data = {"task_id": str(task)}
+        data["event_detail"] = event
+        await self.broadcast(event, data, "task")
+
     @property
     def connection_count(self) -> int:
         return len(self._connections)
@@ -216,6 +231,32 @@ app = FastAPI(
 
 _webui_dir = os.path.dirname(os.path.abspath(__file__))
 
+# --------- P0-C：简单 Bearer Token 鉴权（防局域网远程注入/驱动电脑操作） ---------
+# 从环境变量 WEBUI_TOKEN 读取；未设置则鉴权关闭（保持本地直连可用）。
+# 设了 token 后，/api/*、/ws、POST / 均需 Authorization: Bearer <token>。
+_WEBUI_TOKEN = os.environ.get("WEBUI_TOKEN", "").strip()
+
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    if _WEBUI_TOKEN:
+        path = request.url.path
+        # 保护：所有 API、WebSocket、弹幕注入入口；首页静态资源放行
+        is_protected = (
+            path.startswith("/api/")
+            or path.startswith("/ws")
+            or (path == "/" and request.method == "POST")
+        )
+        if is_protected:
+            auth = request.headers.get("Authorization", "")
+            expected = f"Bearer {_WEBUI_TOKEN}"
+            if auth.strip() != expected:
+                return JSONResponse(
+                    {"status": "error", "message": "未授权：缺少或错误的 Bearer Token"},
+                    status_code=401,
+                )
+    return await call_next(request)
+
 
 @app.on_event("startup")
 async def on_startup():
@@ -231,8 +272,30 @@ async def on_shutdown():
 
 @app.post("/")
 async def danmaku_post(request: Request):
-    """弹幕监听程序的消息转发入口（POST /）"""
+    """弹幕监听程序的消息转发入口（POST /）。
+
+    阶段2：优先投主播脑统一收件箱（inbox，STREAMER_NEW=1 时经门面层小模型/编排）；
+    inbox 未初始化/投递失败则回退旧 handle_post_request 链路。
+    """
+    from fastapi.responses import JSONResponse
     try:
+        from LLM.streamer.inbox import get_inbox
+        from LLM.streamer.message import StreamerMessage
+        inbox = get_inbox()
+        if inbox is not None:
+            data = await request.json()
+            if isinstance(data, dict) and "messages" in data:
+                msgs = data["messages"]
+            elif isinstance(data, list):
+                msgs = data
+            else:
+                msgs = [data]
+            for m in msgs:
+                sm = StreamerMessage.from_openai(
+                    m if isinstance(m, dict) else {}, channel="bili",
+                    msg_type="danmaku" if (m or {}).get("content") else "chat")
+                await inbox.submit(sm)
+            return JSONResponse({"status": "queued", "route": "inbox"})
         app_main = _get_app_main()
         return await app_main.handle_post_request(request)
     except Exception as e:
@@ -371,19 +434,19 @@ async def get_messages(limit: int = Query(default=50, ge=1, le=500)):
 
 @app.post("/api/send")
 async def send_test_message(body: SendMessage):
+    """WebUI 渠道：用户聊天/问题 → 主播脑统一收件箱（阶段1，标准化消息）。"""
     try:
-        app_main = _get_app_main()
-        if app_main._message_queue is None:
-            app_main._message_queue = asyncio.Queue(maxsize=app_main._QUEUE_MAX_SIZE)
-            app_main._queue_worker_task = asyncio.create_task(app_main._queue_worker())
-            logger.warning("消息队列未初始化，已自动创建")
-        if not app_main._message_queue:
-            raise HTTPException(status_code=500, detail="消息队列未初始化")
-        messages = [{"role": "user", "content": f"{body.name}: {body.content}", "name": body.name}]
-        await app_main._message_queue.put(messages)
-        logger.info(f"测试消息已入队: {body.content}")
-        await _ws_manager.broadcast_danmaku(body.name, body.content)
-        return {"success": True, "queued": True}
+        from LLM.streamer.inbox import get_inbox
+        from LLM.streamer.message import StreamerMessage
+        inbox = get_inbox()
+        if inbox is None:
+            raise HTTPException(status_code=500, detail="streamer 收件箱未初始化（需随主程序启动）")
+        msg = StreamerMessage(channel="webui", msg_type="chat",
+                              user_id=str(body.name), user_name=str(body.name),
+                              content=str(body.content))
+        r = await inbox.submit(msg)
+        logger.info(f"WebUI 消息已投收件箱: {body.name}: {body.content[:40]}")
+        return {"success": True, "queued": True, **r}
     except HTTPException:
         raise
     except Exception as e:

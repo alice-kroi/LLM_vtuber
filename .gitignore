@@ -79,6 +79,13 @@ logs/
 *.pth
 *.onnx
 
+# ===== GPT-SoVITS-v2pro 大文件目录（junction 链到 D 盘，勿入库） =====
+GPT-SoVITS-v2pro/runtime/
+GPT-SoVITS-v2pro/GPT_weights/
+GPT-SoVITS-v2pro/SoVITS_weights/
+GPT-SoVITS-v2pro/tools/
+GPT-SoVITS-v2pro/GPT_SoVITS/pretrained_models/
+
 # ===== 本地临时测试脚本 =====
 tool/_*.py
 _tmp/
@@ -97,3 +104,22 @@ dist/
 # ===== Playwright/浏览器下载缓存 =====
 ms-playwright/
 .test-results/
+
+# ===== 整个 data/ 运行数据目录（不拟入库） =====
+data/
+
+# ===== 通用运行产物（数据库/缓存/临时） =====
+*.db
+*.sqlite
+*.sqlite3
+.cache/
+*.tmp
+*.temp
+
+# ===== 已废弃实验代码 =====
+LLM/launcher/launcher_cdp.py
+
+# ===== PvZ 校准/诊断残留 =====
+LLM/pvz/_scan.json
+LLM/pvz/_calib.png
+LLM/pvz/*_calib*.png
