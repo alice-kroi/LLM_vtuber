@@ -28,8 +28,8 @@ def _input_script() -> str:
     return os.path.join(here, "pet_input.py")
 
 
-def _move_pet_to_bottom_left(timeout_s: float = 6.0) -> Dict:
-    """桌宠窗口就绪后移到屏幕左下角（避开任务栏）。"""
+def _move_pet_to_bottom_right(timeout_s: float = 6.0) -> Dict:
+    """桌宠窗口就绪后移到屏幕右下角（避开任务栏）。"""
     import ctypes
     import time
     try:
@@ -45,7 +45,7 @@ def _move_pet_to_bottom_left(timeout_s: float = 6.0) -> Dict:
         wins = [w for w in gw.getAllWindows() if "Bongo" in (w.title or "")]
         if wins:
             w = wins[0]
-            x = margin
+            x = max(0, sw - w.width - margin)
             y = max(0, sh - w.height - taskbar_reserve)
             w.moveTo(x, y)
             return {"moved_to": (x, y), "size": (w.width, w.height)}
@@ -57,7 +57,7 @@ def pet_start(webui_url: str = WEBUI_URL, with_input: bool = True) -> Dict:
     """启动桌宠 + 输入框（幂等：已运行则跳过）。
 
     桌宠大小由 config.json 的 window_size 控制（已默认 300x300）；
-    启动后自动把窗口移到屏幕左下角。
+    启动后自动把窗口移到屏幕右下角。
     """
     global _pet_proc, _input_proc
     result = {"success": True}
@@ -71,7 +71,7 @@ def pet_start(webui_url: str = WEBUI_URL, with_input: bool = True) -> Dict:
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL)
             result["pet"] = {"launched": PET_EXE,
-                             "corner": _move_pet_to_bottom_left()}
+                             "corner": _move_pet_to_bottom_right()}
         except Exception as e:
             return {"success": False, "error": f"桌宠启动失败: {e}"}
     else:
