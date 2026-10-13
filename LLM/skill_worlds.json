@@ -56,5 +56,8 @@
   },
   "browser": {
     "enabled": true
+  },
+  "ui_perception": {
+    "enabled": true
   }
 }
