@@ -365,6 +365,10 @@ class SubprocessSkillWorld(SkillWorld):
 
     python_interp: str = sys.executable
 
+    # 懒启动（扩展性能）：默认首次工具调用才拉起子进程，应用启动更快、重依赖按需加载；
+    # 需要引擎常驻（如主动上报/监听）的域可设 lazy_start=False。
+    lazy_start: bool = True
+
     # 子进程启动参数（由子类提供，通常指向从 stdin 读 JSON 的入口脚本）
     def launch_args(self) -> List[str]:
         raise NotImplementedError
@@ -399,17 +403,20 @@ class SubprocessSkillWorld(SkillWorld):
         await self._spawn()
 
     async def _call_child(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """向子进程发一条 JSON 行并取回结果（含协议自愈）。
+        """向子进程发一条 JSON 行并取回结果（含协议自愈 + 懒启动）。
 
         每次自带递增 id；读响应时丢弃 id 不匹配的残留行与解析失败的行；
         超时/EOF/写失败则自动重建子进程后报错（下一调用即基于干净通道）。
         """
+        # 懒启动：未拉起子进程则先 spawn（_spawn 会初始化 _req_seq/_call_lock 等）
+        if getattr(self, "_proc", None) is None or self._proc.returncode is not None:
+            await self._respawn()
         self._req_seq += 1
         rid = self._req_seq
         payload = json.dumps({"id": rid, "method": method,
                               "params": params or {}}, ensure_ascii=False)
         async with self._call_lock:
-            if getattr(self, "_proc", None) is None or self._proc.returncode is not None:
+            if self._proc.returncode is not None:
                 await self._respawn()
             try:
                 self._proc.stdin.write((payload + "\n").encode("utf-8"))
@@ -463,6 +470,10 @@ class SubprocessSkillWorld(SkillWorld):
 
     # 生命周期：start/stop 管理子进程启停
     async def start(self) -> None:
+        if self.lazy_start:
+            # 懒启动：不立刻 spawn；首次 _call_child 会自动 respawn 拉起
+            logger.info(f"[SkillWorld] {self.id} 懒启动（首次工具调用时拉起子进程）")
+            return
         await self._spawn()
 
     async def stop(self) -> None:
