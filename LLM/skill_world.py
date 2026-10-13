@@ -164,14 +164,20 @@ class SkillWorldAssembly:
         self.deactivate(world_id)
 
     async def start_all(self) -> None:
-        """启动所有激活域的生命周期钩子（应用启动时调用一次）。"""
+        """启动所有激活域的生命周期钩子（应用启动时调用一次）；单域失败不中断其他域。"""
         for wid in list(self._active):
-            await self.start_world(wid)
+            try:
+                await self.start_world(wid)
+            except Exception as e:
+                logger.warning(f"[SkillWorld] 域 {wid} 生命周期启动失败（不影响其他域）: {e}")
 
     async def stop_all(self) -> None:
-        """停用全部域并调用 stop()（应用退出/热停用）。"""
+        """停用全部域并调用 stop()（应用退出/热停用）；单域失败不中断其他域。"""
         for wid in list(self._active):
-            await self.stop_world(wid)
+            try:
+                await self.stop_world(wid)
+            except Exception as e:
+                logger.warning(f"[SkillWorld] 域 {wid} 生命周期停止失败（继续处理其他域）: {e}")
 
     # ---------- 聚合查询（供操作脑消费） ----------
 
@@ -368,14 +374,29 @@ class SubprocessSkillWorld(SkillWorld):
         await self._spawn()
 
     async def stop(self) -> None:
+        """停止子进程：先发 __shutdown__，terminate + 有界 wait，超时 kill 兜底。"""
         if getattr(self, "_proc", None) and self._proc.returncode is None:
             try:
                 self._proc.stdin.write(b'{"method":"__shutdown__","params":{}}\n')
                 await self._proc.stdin.drain()
             except Exception:
                 pass
-            self._proc.terminate()
-            await self._proc.wait()
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(self._proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                logger.warning(f"[SkillWorld] {self.id} 子进程未在 5s 内退出，强制 kill")
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(self._proc.wait(), timeout=3)
+                except Exception:
+                    pass
 
 
 # ---------- 全局单例 + 默认挂载 desktop 域 ----------

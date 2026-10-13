@@ -111,8 +111,11 @@ class ToolRegistry:
                     timeout=timeout
                 )
             else:
-                # 同步工具：直接调用
-                result = tool_func(**tool_call["arguments"])
+                # 同步工具：丢线程池执行，避免阻塞事件循环；同样受超时保护
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(tool_func, **tool_call["arguments"]),
+                    timeout=timeout
+                )
 
             return ToolResult(
                 tool_call_id=tool_call["tool_call_id"],
@@ -469,6 +472,7 @@ try:
         os_list_windows, os_activate_window, os_click_xy, os_type_text,
         os_press_key, os_scroll, ui_list_elements, vision_click,
         os_open_path, os_list_directory, os_minimize_window, os_show_desktop,
+        os_capture_window, os_check, os_open_file, os_find_file, os_browser_search,
     )
     tool_registry.register_tool("os_list_windows", os_list_windows)
     tool_registry.register_tool("os_activate_window", os_activate_window)
@@ -482,7 +486,12 @@ try:
     tool_registry.register_tool("os_list_directory", os_list_directory)
     tool_registry.register_tool("os_minimize_window", os_minimize_window)
     tool_registry.register_tool("os_show_desktop", os_show_desktop)
-    logger.info("AI 操作电脑工具已注册: os_list_windows/activate_window/click_xy/type_text/press_key/scroll/ui_list_elements/vision_click/open_path/list_directory/minimize_window/show_desktop")
+    tool_registry.register_tool("os_capture_window", os_capture_window)
+    tool_registry.register_tool("os_check", os_check)
+    tool_registry.register_tool("os_open_file", os_open_file)
+    tool_registry.register_tool("os_find_file", os_find_file)
+    tool_registry.register_tool("os_browser_search", os_browser_search)
+    logger.info("AI 操作电脑工具已注册: os_list_windows/activate_window/click_xy/type_text/press_key/scroll/ui_list_elements/vision_click/open_path/list_directory/minimize_window/show_desktop/capture_window/check/open_file/find_file/browser_search")
 except ImportError as e:
     logger.warning(f"AI 操作电脑工具未注册（依赖未安装）: {e}")
 
