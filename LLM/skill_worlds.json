@@ -50,5 +50,8 @@
       340,
       340
     ]
+  },
+  "computer_use": {
+    "enabled": true
   }
 }
