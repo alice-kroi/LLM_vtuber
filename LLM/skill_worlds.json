@@ -53,5 +53,8 @@
   },
   "computer_use": {
     "enabled": true
+  },
+  "browser": {
+    "enabled": true
   }
 }
