@@ -294,7 +294,8 @@ async def danmaku_post(request: Request):
                 sm = StreamerMessage.from_openai(
                     m if isinstance(m, dict) else {}, channel="bili",
                     msg_type="danmaku" if (m or {}).get("content") else "chat")
-                await inbox.submit(sm)
+                # 弹幕走 debounce 合批：风暴时安静窗口内攒批，减少无谓模型调用
+                await inbox.submit(sm, trigger="debounce")
             return JSONResponse({"status": "queued", "route": "inbox"})
         app_main = _get_app_main()
         return await app_main.handle_post_request(request)

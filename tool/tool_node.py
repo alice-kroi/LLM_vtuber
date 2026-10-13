@@ -30,6 +30,39 @@ class ToolCall(TypedDict):
     arguments: Dict[str, Any]
 
 
+def tool_schema(name: str, description: str,
+                params: Optional[Dict[str, Dict[str, Any]]] = None,
+                required: Optional[List[str]] = None) -> Dict[str, Any]:
+    """声明式工具 Schema（扩展能力：少写样板 JSON，参数与实现天然一致）。
+
+    用法：
+        tool_schema("cu_find_file",
+                    "按文件名关键词递归搜索文件",
+                    {"keyword": {"type": "string", "description": "文件名关键词"},
+                     "root": {"type": "string", "description": "根目录",
+                              "default": "C:\\\\"}},
+                    required=["keyword"])
+    规则：
+        - params 中带 "default" 的键视为可选参数（不进 required）
+        - 必填由 required 显式声明（缺省 = 全部可选），避免"无 default 即必填"误伤
+        - 生成的 parameters 带 additionalProperties: false（与既有 schema 一致）
+    """
+    props: Dict[str, Any] = {pname: dict(p) for pname, p in (params or {}).items()}
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": props,
+                "additionalProperties": False,
+                "required": list(required or []),
+            },
+        },
+    }
+
+
 class ToolResult(TypedDict):
     """
     工具结果定义
