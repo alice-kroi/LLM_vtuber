@@ -49,39 +49,55 @@ class ToolResult(TypedDict):
 class ToolRegistry:
     """
     工具注册表
-    
+
     管理可用的工具函数，提供工具查找和执行功能。
+    支持工具钩子（PreToolUse / PostToolUse，对齐 Claude Agent SDK 模式）。
     """
-    
+
     def __init__(self):
         """
         初始化工具注册表
         """
         self.tools: Dict[str, Callable] = {}
-    
+        self._hooks: Dict[str, list] = {"pre": [], "post": []}
+
     def register_tool(self, name: str, tool_func: Callable):
         """
         注册工具函数
-        
+
         Args:
             name: 工具名称
             tool_func: 工具函数
         """
         self.tools[name] = tool_func
         logger.info(f"已注册工具: {name}")
-    
+
     def get_tool(self, name: str) -> Optional[Callable]:
         """
         获取工具函数
-        
+
         Args:
             name: 工具名称
-        
+
         Returns:
             工具函数，如果不存在则返回 None
         """
         return self.tools.get(name)
-    
+
+    def add_tool_hook(self, stage: str, hook: Callable,
+                      tool_name: Optional[str] = None) -> None:
+        """注册工具钩子（扩展能力：安全拦截 / 审计 / 副作用）。
+
+        Args:
+            stage: 'pre'（执行前）或 'post'（执行后）。
+                - pre:  hook(name, args) -> None 放行；返回 {"block": True, "reason": "..."} 阻止执行。
+                - post: hook(name, args, result_or_error) 用于审计/副作用，异常被吞掉。
+            tool_name: 仅对指定工具名生效；None = 全部工具。
+        """
+        if stage not in ("pre", "post"):
+            raise ValueError(f"未知钩子阶段: {stage}（pre/post）")
+        self._hooks[stage].append((tool_name, hook))
+
     async def execute_tool(self, tool_call: ToolCall, timeout: float = 60.0) -> ToolResult:
         """
         执行工具调用（支持同步和异步工具函数）
@@ -93,16 +109,33 @@ class ToolRegistry:
         Returns:
             工具执行结果
         """
+        tool_name = tool_call.get("name", "unknown")
+        tool_call_id = tool_call.get("tool_call_id", "")
+        out = None
+        err = None
         try:
-            tool_name = tool_call["name"]
             tool_func = self.get_tool(tool_name)
 
             if not tool_func:
+                err = f"工具不存在: {tool_name}"
                 return ToolResult(
-                    tool_call_id=tool_call["tool_call_id"],
+                    tool_call_id=tool_call_id,
                     tool_name=tool_name,
-                    error=f"工具不存在: {tool_name}"
+                    error=err
                 )
+
+            # PreToolUse 钩子：校验/拦截（安全护栏的挂载点）
+            for tn, hook in self._hooks["pre"]:
+                if tn is not None and tn != tool_name:
+                    continue
+                try:
+                    r = hook(tool_name, tool_call["arguments"])
+                except Exception as e:
+                    err = f"PreToolUse 钩子异常: {e}"
+                    return ToolResult(tool_call_id=tool_call_id, tool_name=tool_name, error=err)
+                if isinstance(r, dict) and r.get("block"):
+                    err = f"被安全钩子拦截: {r.get('reason', '')}"
+                    return ToolResult(tool_call_id=tool_call_id, tool_name=tool_name, error=err)
 
             # 异步工具：await + 超时保护
             if asyncio.iscoroutinefunction(tool_func):
@@ -116,29 +149,27 @@ class ToolRegistry:
                     asyncio.to_thread(tool_func, **tool_call["arguments"]),
                     timeout=timeout
                 )
-
-            return ToolResult(
-                tool_call_id=tool_call["tool_call_id"],
-                tool_name=tool_name,
-                result=result
-            )
+            out = result
 
         except asyncio.TimeoutError:
-            error_msg = f"工具执行超时 ({timeout}s): {tool_call.get('name', 'unknown')}"
-            logger.error(error_msg)
-            return ToolResult(
-                tool_call_id=tool_call.get("tool_call_id", ""),
-                tool_name=tool_call.get("name", "unknown"),
-                error=error_msg
-            )
+            err = f"工具执行超时 ({timeout}s): {tool_name}"
+            logger.error(err)
         except Exception as e:
-            error_msg = f"工具执行失败: {str(e)}"
-            logger.error(error_msg)
-            return ToolResult(
-                tool_call_id=tool_call.get("tool_call_id", ""),
-                tool_name=tool_call.get("name", "unknown"),
-                error=error_msg
-            )
+            err = f"工具执行失败: {str(e)}"
+            logger.error(err)
+        finally:
+            # PostToolUse 钩子：审计/副作用（异常吞掉，不影响主流程）
+            for tn, hook in self._hooks["post"]:
+                if tn is not None and tn != tool_name:
+                    continue
+                try:
+                    hook(tool_name, tool_call["arguments"], out if out is not None else err)
+                except Exception:
+                    pass
+
+        if err is not None:
+            return ToolResult(tool_call_id=tool_call_id, tool_name=tool_name, error=err)
+        return ToolResult(tool_call_id=tool_call_id, tool_name=tool_name, result=out)
 
 
 # 全局工具注册表实例

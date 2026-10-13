@@ -44,6 +44,14 @@ class SkillWorld:
         """补充到操作脑 prompt 的域说明（可用工具 + 该域执行约定）。"""
         return ""
 
+    def preflight(self) -> Optional[str]:
+        """激活前的前置检查（对齐可提 preflight）。返回 None=可激活；返回字符串=拒绝理由。
+
+        子类可覆盖：如检查运行时依赖/配置是否就绪，未就绪时给出明确原因，
+        start_world() 会据此拒绝启动该域。
+        """
+        return None
+
     def tools(self) -> List[dict]:
         """从真实工具 Schema 过滤出本域允许的子集（懒加载，避免模块间循环导入）。"""
         raise NotImplementedError
@@ -73,10 +81,16 @@ class SkillWorldAssembly:
         self._active: set = set()
         self._started: set = set()          # P2-1：已启动生命周期的域
         self._reserved: set = set(reserved_names or [])
+        # 聚合查询缓存（扩展性能：激活域变更时才重建，避免每次调用全量重建）
+        self._cache: Dict[str, Any] = {}
         # P2-3：域级配置文件（skill_worlds.json 风格，敏感/域级开关放这里）
         self._config: Dict[str, Any] = config or {}
         if config_path:
             self.load_config(config_path)
+
+    def _invalidate(self) -> None:
+        """域挂载/启停变化时清空聚合缓存（下次查询重建）。"""
+        self._cache.clear()
 
     @property
     def reserved(self) -> set:
@@ -119,6 +133,7 @@ class SkillWorldAssembly:
             logger.info(f"[SkillWorld] 已挂载并激活 {world.label}（{world.id}）")
         else:
             logger.info(f"[SkillWorld] 已挂载但未激活（{world.id} 未启用）")
+        self._invalidate()
 
     def _world_enabled(self, world: SkillWorld) -> bool:
         cfg = self._config.get(world.id)
@@ -133,6 +148,7 @@ class SkillWorldAssembly:
         if world_id not in self._registry:
             raise ValueError(f"未知能力域: {world_id}")
         self._active.add(world_id)
+        self._invalidate()
         logger.info(f"[SkillWorld] 已启用 {world_id}")
 
     def deactivate(self, world_id: str) -> None:
@@ -140,6 +156,7 @@ class SkillWorldAssembly:
         if world_id in self._active:
             self._active.discard(world_id)
             self._started.discard(world_id)   # 停用连带生命周期标记清除
+            self._invalidate()
             logger.info(f"[SkillWorld] 已停用 {world_id}")
 
     # ---------- P2-1：域级生命周期钩子（start/stop 资源启停） ----------
@@ -148,6 +165,11 @@ class SkillWorldAssembly:
         """激活并调用该域 start()（资源/连接启动）。可重复调用取幂。"""
         self.activate(world_id)
         world = self._registry[world_id]
+        # 前置检查：域可声明"未就绪则拒绝启动"（对齐可提 preflight）
+        reason = world.preflight()
+        if reason:
+            self.deactivate(world_id)
+            raise ValueError(f"域 {world_id} 前置检查未通过: {reason}")
         if world_id not in self._started:
             await world.start()
             self._started.add(world_id)
@@ -185,23 +207,34 @@ class SkillWorldAssembly:
         return [self._registry[i] for i in self._active if i in self._registry]
 
     def active_tool_names(self) -> List[str]:
+        if "names" in self._cache:
+            return self._cache["names"]
         names: List[str] = []
         for w in self.enabled_worlds():
             for n in w.allowed_names():
                 if n not in names:
                     names.append(n)
+        self._cache["names"] = names
         return names
 
     def active_tool_schemas(self) -> List[dict]:
+        if "schemas" in self._cache:
+            return self._cache["schemas"]
         schemas: List[dict] = []
         for w in self.enabled_worlds():
             for s in w.tools():
                 schemas.append(s)
+        self._cache["schemas"] = schemas
         return schemas
 
     def build_system_prompt(self, base: str = "") -> str:
+        key = ("prompt", base)
+        if key in self._cache:
+            return self._cache[key]
         fragments = [f for w in self.enabled_worlds() if (f := w.system_prompt_fragment())]
-        return base + "\n".join(fragments) if fragments else base
+        out = base + "\n".join(fragments) if fragments else base
+        self._cache[key] = out
+        return out
 
 
 # ---------- desktop 域：封装现有电脑操作工具 ----------
