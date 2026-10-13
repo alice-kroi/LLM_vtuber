@@ -40,6 +40,8 @@ class ComputerUseWorld(SubprocessSkillWorld):
     label = "电脑常规操作（Computer Use）"
     prefix = "cu_"
     default_enabled = False
+    # 工具级超时覆盖（父侧等待上限）：全盘搜文件可能很慢，单独放宽
+    tool_timeouts = {"cu_find_file": 180}
 
     def _engine_path(self) -> str:
         here = os.path.dirname(os.path.abspath(__file__))

@@ -25,6 +25,17 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _assign_deep(target: Dict[str, Any], patch: Dict[str, Any]) -> None:
+    """就地深合并：叶子替换，沿途对象身份保持（对齐可提 persist 语义）。"""
+    for k, v in patch.items():
+        if v is None:
+            continue
+        if isinstance(v, dict) and isinstance(target.get(k), dict):
+            _assign_deep(target[k], v)
+        else:
+            target[k] = v
+
+
 # ---------- 能力域契约 ----------
 
 class SkillWorld:
@@ -83,6 +94,7 @@ class SkillWorldAssembly:
         self._reserved: set = set(reserved_names or [])
         # 聚合查询缓存（扩展性能：激活域变更时才重建，避免每次调用全量重建）
         self._cache: Dict[str, Any] = {}
+        self._config_path: Optional[str] = None
         # P2-3：域级配置文件（skill_worlds.json 风格，敏感/域级开关放这里）
         self._config: Dict[str, Any] = config or {}
         if config_path:
@@ -103,10 +115,47 @@ class SkillWorldAssembly:
         if not isinstance(data, dict):
             raise ValueError(f"skill_worlds 配置必须是 JSON 对象: {path}")
         self._config = {**(self._config), **data}
+        self._config_path = path
         logger.info(f"[SkillWorld] 已加载域级配置: {path}")
 
     def world_config(self, world_id: str) -> Dict[str, Any]:
         return self._config.get(world_id, {})
+
+    def persist_world_config(self, world_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+        """域配置热重载：深合并 patch 进 worlds.<id> 并写回 skill_worlds.json（对齐可提 persist）。
+
+        支持运行时可改的域参数（如 call_timeout、实例列表、房间号），
+        写回后经 restart_world() 让域按新配置重建。
+        """
+        section = self._config.setdefault(world_id, {})
+        _assign_deep(section, patch)
+        if self._config_path:
+            try:
+                with open(self._config_path, "w", encoding="utf-8") as f:
+                    json.dump(self._config, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                return {"success": False, "error": f"写回配置失败: {e}"}
+        self._invalidate()
+        return {"success": True, "world": world_id, "config": section}
+
+    def set_world_enabled(self, world_id: str, enabled: bool) -> Dict[str, Any]:
+        """运行时开关域并写回配置（重启保留）。activate/deactivate 本身仅改内存。"""
+        if world_id not in self._registry:
+            raise ValueError(f"未知能力域: {world_id}")
+        if enabled:
+            self.activate(world_id)
+        else:
+            self.deactivate(world_id)
+        return self.persist_world_config(world_id, {"enabled": bool(enabled)})
+
+    async def restart_world(self, world_id: str) -> None:
+        """热重启一个域：停掉旧实例后按最新配置重新启动（保留激活语义）。"""
+        if world_id not in self._registry:
+            raise ValueError(f"未知能力域: {world_id}")
+        was_active = world_id in self._active
+        await self.stop_world(world_id)
+        if was_active:
+            await self.start_world(world_id)
 
     def register_world(self, world: SkillWorld) -> None:
         """登记一个能力域。校验工具名冲突（toolClash）与保留字占用，冲突则拒绝挂载。"""
@@ -165,6 +214,8 @@ class SkillWorldAssembly:
         """激活并调用该域 start()（资源/连接启动）。可重复调用取幂。"""
         self.activate(world_id)
         world = self._registry[world_id]
+        # 把域配置注入世界实例（call_timeout 等运行参数在 _spawn 时读取）
+        world.world_config = self.world_config(world_id)
         # 前置检查：域可声明"未就绪则拒绝启动"（对齐可提 preflight）
         reason = world.preflight()
         if reason:
@@ -328,7 +379,10 @@ class SubprocessSkillWorld(SkillWorld):
             raise RuntimeError("子进程通道未建立")
         self._call_lock = asyncio.Lock()                 # 并发写读串行化
         self._req_seq = 0                                # 自增请求 id
-        self._call_timeout = getattr(self, "call_timeout", 300.0)
+        # 每域 call_timeout：worlds.<id>.call_timeout（配置）> 类属性 call_timeout > 默认 300
+        self._call_timeout = float(
+            getattr(self, "world_config", {}).get(
+                "call_timeout", getattr(self, "call_timeout", 300.0)))
 
     async def _respawn(self) -> None:
         """重建子进程：丢弃旧管道里的一切残留响应，恢复行协议到干净状态。"""
@@ -363,7 +417,12 @@ class SubprocessSkillWorld(SkillWorld):
             except Exception as e:
                 await self._respawn()
                 raise RuntimeError(f"[{self.id}] 子进程写失败，已重建: {e}")
-            deadline = time.monotonic() + self._call_timeout
+            # 工具级超时：tool_timeouts[method] > 域 call_timeout
+            timeout = self._call_timeout
+            tmap = getattr(self, "tool_timeouts", None)
+            if tmap and method in tmap:
+                timeout = float(tmap[method])
+            deadline = time.monotonic() + timeout
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

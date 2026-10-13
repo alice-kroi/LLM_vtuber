@@ -52,12 +52,15 @@
     ]
   },
   "computer_use": {
-    "enabled": true
+    "enabled": true,
+    "call_timeout": 120
   },
   "browser": {
-    "enabled": true
+    "enabled": true,
+    "call_timeout": 120
   },
   "ui_perception": {
-    "enabled": true
+    "enabled": true,
+    "call_timeout": 60
   }
 }
