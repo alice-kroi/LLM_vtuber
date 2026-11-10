@@ -79,12 +79,11 @@ logs/
 *.pth
 *.onnx
 
-# ===== GPT-SoVITS-v2pro 大文件目录（junction 链到 D 盘，勿入库） =====
-GPT-SoVITS-v2pro/runtime/
-GPT-SoVITS-v2pro/GPT_weights/
-GPT-SoVITS-v2pro/SoVITS_weights/
-GPT-SoVITS-v2pro/tools/
-GPT-SoVITS-v2pro/GPT_SoVITS/pretrained_models/
+# ===== GPT-SoVITS-v2pro 第三方目录（体积大，整目录勿入库） =====
+GPT-SoVITS-v2pro/
+
+# ===== 本地 rerank / 嵌入模型（体积大，按需下载） =====
+models/
 
 # ===== 本地临时测试脚本 =====
 tool/_*.py
@@ -123,3 +122,21 @@ LLM/launcher/launcher_cdp.py
 LLM/pvz/_scan.json
 LLM/pvz/_calib.png
 LLM/pvz/*_calib*.png
+
+# ===== 运行时数据 / 本地工作产物 =====
+*.db-wal
+*.db-shm
+*.wav
+persona/sing_output/
+persona/clips/
+persona/capability_snapshots/
+backups/
+evals/runs/
+docs/*.pdf
+
+# ===== 本地工具/IDE 状态 =====
+.trae/
+.spec-workflow/
+.pytest_cache/
+test_time_info.py
+test_time_info_import.py

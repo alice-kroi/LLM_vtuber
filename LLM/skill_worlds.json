@@ -1,6 +1,6 @@
 {
   "pvz": {
-    "enabled": false,
+    "enabled": true,
     "executable": "D:/steam/steamapps/common/Plants Vs Zombies/PlantsVsZombies.exe",
     "offsets_profile": "steam-1.2.0.1096",
     "poll_hz": 15,
@@ -16,12 +16,21 @@
   "desktop_agent": {
     "enabled": true
   },
-  "bili": {
-    "enabled": true,
+  "bili_live": {
+    "enabled": false,
     "room_ids": [],
     "sessdata_env": "BILIBILI_SESSDATA",
     "forward_http": true,
     "buffer_size": 200
+  },
+  "bili_video": {
+    "enabled": true,
+    "sessdata_env": "BILIBILI_SESSDATA",
+    "jct_env": "BILIBILI_JCT",
+    "default_uid": 0,
+    "min_interval_ms": 1200,
+    "subtitle_max_chars": 8000,
+    "comments_page_size": 20
   },
   "streamer": {
     "enabled": true,
@@ -51,10 +60,6 @@
       340
     ]
   },
-  "computer_use": {
-    "enabled": true,
-    "call_timeout": 120
-  },
   "browser": {
     "enabled": true,
     "call_timeout": 120
@@ -62,5 +67,20 @@
   "ui_perception": {
     "enabled": true,
     "call_timeout": 60
+  },
+  "webui": {
+    "enabled": true
+  },
+  "desktop": {
+    "enabled": true
+  },
+  "cultist": {
+    "enabled": true
+  },
+  "spec_workflow": {
+    "enabled": true
+  },
+  "eval_lab": {
+    "enabled": true
   }
 }

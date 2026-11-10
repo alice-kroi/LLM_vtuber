@@ -16,12 +16,20 @@ import uuid
 import os
 import configparser
 
-from Millvus_base import (
-    init_milvus_client,
-    get_connection_manager,
-    DoubaoEmbeddings,
-    query_test_data
-)
+try:  # 包导入（RAG.RAG_node）
+    from RAG.Millvus_base import (
+        init_milvus_client,
+        get_connection_manager,
+        DoubaoEmbeddings,
+        query_test_data
+    )
+except ImportError:  # 兼容把 RAG/ 加入 sys.path 的旧入口
+    from Millvus_base import (
+        init_milvus_client,
+        get_connection_manager,
+        DoubaoEmbeddings,
+        query_test_data
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +180,11 @@ def _ensure_collection_loaded(client, collection_name: str):
             logger.debug(f"[RAG] 集合加载跳过: {e2}")
 
 
+def _invalidate_collection_loaded(collection_name: str):
+    """Milvus 重启或搜索失败后，强制下次重新检查加载状态。"""
+    _loaded_collections.discard(collection_name)
+
+
 def _milvus_search_with_retry(client, collection_name: str, vector, top_k: int,
                               metric_type: str, nprobe: int, max_retries: int = 2):
     """Milvus 搜索，带简单的瞬态错误重试"""
@@ -192,7 +205,8 @@ def _milvus_search_with_retry(client, collection_name: str, vector, top_k: int,
             last_err = e
             if attempt < max_retries:
                 logger.warning(f"[RAG] Milvus 搜索重试 {attempt+1}/{max_retries}: {e}")
-                # 尝试重连：重新加载集合
+                # 搜索失败常见于服务重启/集合被卸载：先清缓存再重载
+                _invalidate_collection_loaded(collection_name)
                 try:
                     _ensure_collection_loaded(client, collection_name)
                 except Exception:

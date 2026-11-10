@@ -1,0 +1,16 @@
+{
+  "id": "spec_workflow",
+  "label": "规格驱动交付流程",
+  "version": 1,
+  "risk": "R1",
+  "source": "port:SpecWorkflow",
+  "description": "需求审讯→写规格→执行→交付评审→修复计划→缺陷诊断；需求账本落库，执行时每轮注入，改文件后已通过项转 stale",
+  "smoke": {
+    "spec_triage": {
+      "request": "把首页按钮的字号调大一点"
+    },
+    "spec_list": {
+      "limit": 3
+    }
+  }
+}

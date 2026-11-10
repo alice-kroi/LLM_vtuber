@@ -1,0 +1,24 @@
+{
+  "name": "smoke",
+  "description": "仓库基本健康检查：无网络、无副作用，用于验证评测链路",
+  "cases": [
+    {
+      "id": "import-llm-v2",
+      "checks": [
+        "python -c \"import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('LLM_v2') else 1)\""
+      ]
+    },
+    {
+      "id": "compile-core",
+      "checks": [
+        "python -m py_compile LLM_v2\\main.py LLM_v2\\brains\\coding_loop.py LLM_v2\\domains\\eval_lab\\eval_lab.py"
+      ]
+    },
+    {
+      "id": "sql-demo-guarded",
+      "checks": [
+        "python -c \"s=open(r'examples/security/sql_defense_ai_demo/app.py',encoding='utf-8').read(); raise SystemExit(0 if ('debug=False' in s and 'ESCAPE' in s) else 1)\""
+      ]
+    }
+  ]
+}

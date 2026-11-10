@@ -11,7 +11,6 @@ from datetime import datetime
 from minio import Minio
 from minio.error import S3Error
 from pymilvus import MilvusClient, DataType, CollectionSchema, FieldSchema
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +69,11 @@ class MinIOManager:
         self.secure = secure if secure is not None else MINIO_SECURE
         self.client = None
         self._initialized = True
-        self._connect()
+
+    def _ensure_client(self):
+        if self.client is None:
+            self._connect()
+        return self.client
 
     def _connect(self):
         try:
@@ -83,12 +86,14 @@ class MinIOManager:
             logger.info(f"MinIO 连接成功: {self.endpoint}")
         except Exception as e:
             logger.error(f"MinIO 连接失败: {str(e)}")
+            self.client = None
             raise
 
     def ensure_bucket(self, bucket_name: str = KNOWLEDGE_BUCKET):
+        client = self._ensure_client()
         try:
-            if not self.client.bucket_exists(bucket_name):
-                self.client.make_bucket(bucket_name)
+            if not client.bucket_exists(bucket_name):
+                client.make_bucket(bucket_name)
                 logger.info(f"MinIO 创建存储桶: {bucket_name}")
             return True
         except S3Error as e:
@@ -119,7 +124,8 @@ class MinIOManager:
 
     def download_file(self, object_name: str, bucket_name: str = KNOWLEDGE_BUCKET) -> bytes:
         try:
-            response = self.client.get_object(bucket_name, object_name)
+            client = self._ensure_client()
+            response = client.get_object(bucket_name, object_name)
             data = response.read()
             response.close()
             return data
@@ -129,7 +135,8 @@ class MinIOManager:
 
     def delete_file(self, object_name: str, bucket_name: str = KNOWLEDGE_BUCKET) -> bool:
         try:
-            self.client.remove_object(bucket_name, object_name)
+            client = self._ensure_client()
+            client.remove_object(bucket_name, object_name)
             logger.info(f"MinIO 删除文件: {object_name}")
             return True
         except S3Error as e:
@@ -139,7 +146,8 @@ class MinIOManager:
     def get_presigned_url(self, object_name: str, bucket_name: str = KNOWLEDGE_BUCKET, 
                          expires: int = 3600) -> str:
         try:
-            url = self.client.presigned_get_object(bucket_name, object_name, expires=expires)
+            client = self._ensure_client()
+            url = client.presigned_get_object(bucket_name, object_name, expires=expires)
             return url
         except S3Error as e:
             logger.error(f"MinIO 生成签名URL失败: {str(e)}")
@@ -147,7 +155,8 @@ class MinIOManager:
 
     def list_objects(self, bucket_name: str = KNOWLEDGE_BUCKET, prefix: str = "") -> List[Dict]:
         try:
-            objects = self.client.list_objects(bucket_name, prefix=prefix, recursive=True)
+            client = self._ensure_client()
+            objects = client.list_objects(bucket_name, prefix=prefix, recursive=True)
             result = []
             for obj in objects:
                 result.append({
@@ -291,13 +300,9 @@ class KnowledgeBaseManager:
             return f"[文件] {filename}"
 
     def _generate_embedding(self, text: str) -> List[float]:
-        try:
-            from Millvus_base import DoubaoEmbeddings
-            embedder = DoubaoEmbeddings()
-            return embedder.embed_query(text)
-        except Exception as e:
-            logger.error(f"生成向量嵌入失败: {str(e)}")
-            return np.random.random(VECTOR_DIM).tolist()
+        """查询/文档嵌入；失败抛出，禁止写随机向量。"""
+        from RAG.RAG_node import get_embedding_model
+        return get_embedding_model().embed_query(text)
 
     def add_document(self, file_data: bytes, filename: str, 
                     uploaded_by: str = "system",

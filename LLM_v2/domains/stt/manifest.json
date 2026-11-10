@@ -1,0 +1,10 @@
+{
+  "id": "stt",
+  "label": "语音转写",
+  "version": "1.0.0",
+  "risk": "R3",
+  "builtin": true,
+  "smoke": {
+    "stt_health": {}
+  }
+}

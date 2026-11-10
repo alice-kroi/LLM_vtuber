@@ -480,8 +480,16 @@ class DoubaoTtsProvider(CloudTtsProvider):
                     ) as resp:
                         if resp.status != 200:
                             body = await resp.text()
-                            last_error = f"HTTP {resp.status}: {body[:200]}"
+                            # P0-3：按状态码分类——429/5xx/网络 才重试；401等其他 4xx 属永久错误，立即放弃避免空转
+                            try:
+                                from common.retry import is_retryable_status
+                                retryable = is_retryable_status(resp.status)
+                            except Exception:
+                                retryable = True
+                            last_error = f"HTTP {resp.status}: {body[:200]} (retryable={retryable})"
                             logger.error(f"[Doubao TTS V3] {last_error}")
+                            if not retryable:
+                                break
                             continue
 
                         async for chunk in resp.content.iter_chunked(4096):

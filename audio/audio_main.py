@@ -28,6 +28,18 @@ from audio_deal import (
     get_audio_output_devices
 )
 
+# 可插拔 TTS 引擎层（新增；导入即注册各引擎，缺依赖的引擎自动跳过）
+try:
+    import tts_engine  # noqa: F401
+    import engines  # noqa: F401  触发 engines/__init__ 加载所有引擎
+    from stream_player import play_pcm_stream
+    TTS_ENGINE_AVAILABLE = True
+except ImportError as e:
+    TTS_ENGINE_AVAILABLE = False
+    tts_engine = None
+    play_pcm_stream = None
+    logger.warning(f"TTS 引擎层未加载(将使用旧 path): {e}")
+
 # 云端 TTS 模块（可选）
 try:
     from cloud_tts import cloud_tts_synthesize, CloudTtsConfig, get_cloud_tts_status
@@ -741,6 +753,59 @@ async def play_tts_audio(text: str, prompt_text: str = "",
     
     return result
 
+
+async def _stream_synthesize_and_play(content: str, tone: str, ref_audio_path: str,
+                                      prompt_text: str = "") -> Dict[str, Any]:
+    """
+    可插拔 TTS 引擎层：真流式合成并边收边播（IO 流式）。
+
+    优先用引擎的 astream() → play_pcm_stream() 真流式播放；
+    若引擎层不可用或流式失败，回退到旧 tts_request_and_stream_play。
+    """
+    result = {"success": False, "error": None, "audio_duration": 0.0}
+    engine_name = ""
+    if not TTS_ENGINE_AVAILABLE or tts_engine is None or play_pcm_stream is None:
+        return await tts_request_and_stream_play(content, prompt_text, ref_audio_path)
+
+    try:
+        from tts_engine import resolve_engine, get_engine_names
+        # 从主 config.ini 或环境变量读 [tts] engine 偏好
+        pref = os.environ.get("TTS_ENGINE", "auto")
+        try:
+            import configparser
+            _cfg = configparser.ConfigParser()
+            if _cfg.read(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config.ini")):
+                _val = _cfg.get("tts", "engine", fallback="").strip()
+                if _val:
+                    pref = _val
+        except Exception:
+            pass
+        engine = resolve_engine(pref)
+        if engine is None:
+            logger.warning(f"无可用 TTS 引擎(可用={get_engine_names()})，回退旧 path")
+            return await tts_request_and_stream_play(content, prompt_text, ref_audio_path)
+        engine_name = engine.name
+        logger.info(f"[TTSEngine] 使用引擎: {engine.name} ({engine.display_name})")
+
+        # 真流式：engine.astream → stream_player 边收边播
+        try:
+            chunk_iter = engine.astream(content, tone=tone, ref_audio=ref_audio_path)
+            play = await play_pcm_stream(chunk_iter, sample_rate=32000)
+            if play["success"]:
+                result["success"] = True
+                result["audio_duration"] = play.get("duration", 0.0)
+                result["engine"] = engine_name
+                return result
+            result["error"] = play.get("error")
+            logger.warning(f"[TTSEngine] 流式播放失败({engine.name}): {result['error']}，回退旧 path")
+            return await tts_request_and_stream_play(content, prompt_text, ref_audio_path)
+        except Exception as e:
+            logger.warning(f"[TTSEngine] 流式异常({engine.name}): {e}，回退旧 path")
+            return await tts_request_and_stream_play(content, prompt_text, ref_audio_path)
+    except Exception as e:
+        logger.error(f"[TTSEngine] 引擎层异常: {e}")
+        return await tts_request_and_stream_play(content, prompt_text, ref_audio_path)
+
 async def tts_node(state) -> dict:
     """
     LangGraph TTS节点（异步）
@@ -814,8 +879,8 @@ async def tts_node(state) -> dict:
             f"ref={os.path.basename(ref_audio_path) if ref_audio_path else '默认'}"
         )
 
-        # 直接 await，避免 asyncio.run() 导致的事件循环冲突
-        play_result = await tts_request_and_stream_play(content, prompt_text, ref_audio_path)
+        # 可插拔 TTS 引擎层：优先真流式（边收边播）；失败回退旧 path
+        play_result = await _stream_synthesize_and_play(content, tone, ref_audio_path, prompt_text)
 
         # 更新状态
         def _apply(s: dict) -> dict:

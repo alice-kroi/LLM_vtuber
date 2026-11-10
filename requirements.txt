@@ -1,4 +1,4 @@
-﻿aext-assistant @ file:///C:/b/abs_98xvdek9qa/croot/aext-assistant_1734644152369/work
+aext-assistant @ file:///C:/b/abs_98xvdek9qa/croot/aext-assistant_1734644152369/work
 aext-assistant-server @ file:///C:/b/abs_93twy7n40b/croot/aext-assistant-server_1734640405857/work
 aext-core @ file:///C:/b/abs_73k82brgp5/croot/aext-core_1734637800697/work
 aext-core-server @ file:///C:/b/abs_e3xgm257mx/croot/aext-core-server_1734635079146/work
@@ -189,8 +189,6 @@ MarkupSafe @ file:///C:/Users/dev-admin/perseverance-python-buildout/croot/marku
 matplotlib==3.9.2
 matplotlib-inline @ file:///C:/Users/dev-admin/perseverance-python-buildout/croot/matplotlib-inline_1699484796387/work
 mccabe @ file:///opt/conda/conda-bld/mccabe_1644221741721/work
-mcp==2.0.0
-mcp-types==2.0.0
 mdit-py-plugins @ file:///C:/Users/dev-admin/perseverance-python-buildout/croot/mdit-py-plugins_1699559788389/work
 mdurl @ file:///C:/Users/dev-admin/perseverance-python-buildout/croot/mdurl_1699473506455/work
 menuinst @ file:///C:/b/abs_76jwd47ck1/croot/menuinst_1723567618942/work

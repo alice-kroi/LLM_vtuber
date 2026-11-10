@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>LLM_vtuber V2 控制台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%9F%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css?v=19">
+</head>
+<body>
+  <header id="topbar">
+    <div class="title">
+      <span class="logo">🐟</span>
+      <span class="name">LLM_vtuber V2 控制台</span>
+    </div>
+    <div class="status-pills">
+      <div class="pill"><span class="label">人格</span><span id="pill-persona">维尔薇</span></div>
+      <div class="pill"><span class="label">心情</span><span id="pill-mood">-</span></div>
+      <div class="pill"><span class="label">能量</span><span id="pill-energy">-</span></div>
+      <div class="pill"><span class="label">域</span><span id="pill-domains">0/0</span></div>
+      <div class="pill"><span class="label">WS</span><span id="pill-ws" class="dot gray">离线</span></div>
+      <button id="btn-refresh" class="btn-icon" title="刷新">⟳</button>
+    </div>
+  </header>
+
+  <!-- 主 Tab 导航（6 个子界面） -->
+  <nav id="main-tabs">
+    <button class="mtab active" data-tab="overview">📋 总览</button>
+    <button class="mtab" data-tab="tasks">🛰️ 任务</button>
+    <button class="mtab" data-tab="brains">🧠 思维</button>
+    <button class="mtab" data-tab="capabilities">🧩 能力</button>
+    <button class="mtab" data-tab="data">📊 数据与进程</button>
+    <button class="mtab" data-tab="memory">📚 记忆</button>
+    <button class="mtab" data-tab="will">🫀 意志</button>
+    <button class="mtab" data-tab="logs">📜 日志</button>
+  </nav>
+
+  <main id="main">
+    <!-- ==================== ⓪ 总览：3 脑在干啥 + 能力清单 ==================== -->
+    <section id="tab-overview" class="tab-pane active">
+      <div class="ov-grid">
+        <!-- 3 脑状态总览 -->
+        <div class="card">
+          <div class="card-title">🧠 3 脑当前动态</div>
+          <div id="ov-brains"></div>
+        </div>
+        <!-- 能力域总览 -->
+        <div class="card">
+          <div class="card-title">🧩 能力域总览（<span id="ov-domain-count">0</span> 个）</div>
+          <div id="ov-domains"></div>
+        </div>
+        <!-- 系统统计 -->
+        <div class="card">
+          <div class="card-title">📊 系统统计</div>
+          <div class="kv-grid" id="ov-stats"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== ⓪b 任务总览：任务 / 进程 / 存储 / 对话 ==================== -->
+    <section id="tab-tasks" class="tab-pane">
+      <div class="card">
+        <div class="card-title">📌 当前概况 <span id="tk-hint" class="cs-meta"></span></div>
+        <div class="kv-grid" id="tk-kpi">
+          <div class="placeholder">加载中…</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">▶ 任务清单 <span id="tk-task-hint" class="cs-meta"></span></div>
+        <div id="tk-tasks"><div class="placeholder">加载中…</div></div>
+      </div>
+
+      <div class="tk-split">
+        <div class="card">
+          <div class="card-title">⚙️ 子进程 / 能力域 <span id="tk-proc-hint" class="cs-meta"></span></div>
+          <div id="tk-procs"><div class="placeholder">加载中…</div></div>
+        </div>
+        <div class="card">
+          <div class="card-title">💾 存储占用 <span id="tk-storage-hint" class="cs-meta"></span></div>
+          <div id="tk-storage"><div class="placeholder">加载中…</div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">💬 最近对话 <span id="tk-chat-hint" class="cs-meta"></span></div>
+        <div id="tk-chat" class="tk-chat"><div class="placeholder">加载中…</div></div>
+      </div>
+    </section>
+
+    <!-- ==================== ① 思维：3 脑 ==================== -->
+    <section id="tab-brains" class="tab-pane">
+      <div class="brains-subtabs">
+        <button class="btab active" data-brain="will_engine">💭 思维脑</button>
+        <button class="btab" data-brain="streamer">💬 主播脑</button>
+        <button class="btab" data-brain="operator">🔧 操作脑</button>
+      </div>
+
+      <!-- 思维脑视图 -->
+      <div id="view-will_engine" class="brain-view active">
+        <div class="view-header">
+          <h2>WillEngine · 思维脑</h2>
+          <span class="brain-status" id="we-status">idle</span>
+        </div>
+        <div class="card">
+          <div class="card-title">🤔 当前想法 / 决策</div>
+          <div class="brain-decision" id="we-decision"><div class="placeholder">尚未做决策</div></div>
+        </div>
+        <div class="card">
+          <div class="card-title">🗺️ 正在进行的活动（任务监控）</div>
+          <div id="we-monitor">
+            <div class="placeholder">暂无运行中任务</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">📊 状态</div>
+          <div class="kv-grid">
+            <div class="kv"><span>决策模式</span><b id="we-mode">hybrid</b></div>
+            <div class="kv"><span>决策数</span><b id="we-count">0</b></div>
+            <div class="kv"><span>空闲</span><b id="we-idle">0s</b></div>
+            <div class="kv"><span>自主决策</span><b id="we-auto">off</b></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 主播脑视图 -->
+      <div id="view-streamer" class="brain-view">
+        <div class="view-header">
+          <h2>Streamer · 主播脑</h2>
+          <span class="brain-status" id="st-status">等待输入</span>
+        </div>
+        <div class="card">
+          <div class="card-title">📥 最近输入</div>
+          <div class="brain-input" id="st-input"><div class="placeholder">等待用户输入…</div></div>
+        </div>
+        <div class="card">
+          <div class="card-title">📤 最近回复</div>
+          <div class="brain-response" id="st-response"><div class="placeholder">等待响应…</div></div>
+        </div>
+        <div class="card">
+          <div class="card-title">💬 对话记录</div>
+          <ul id="st-conversation" class="plain-list"></ul>
+        </div>
+      </div>
+
+      <!-- 操作脑视图 -->
+      <div id="view-operator" class="brain-view">
+        <div class="view-header">
+          <h2>Operator · 操作脑</h2>
+          <span class="brain-status" id="op-status">空闲</span>
+        </div>
+        <div class="card">
+          <div class="card-title">▶ 当前任务</div>
+          <div class="op-current" id="op-current"><div class="placeholder">无执行中任务</div></div>
+        </div>
+        <div class="card">
+          <div class="card-title">🧵 任务队列</div>
+          <div class="kv-grid">
+            <div class="kv"><span>队列长度</span><b id="op-queue">0</b></div>
+            <div class="kv"><span>累计任务</span><b id="op-total">0</b></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">🕘 最近任务</div>
+          <ul id="op-list" class="plain-list"></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== ② 能力 ==================== -->
+    <section id="tab-capabilities" class="tab-pane">
+      <div class="cap-layout">
+        <div class="cap-list">
+          <div class="domain-toolbar">
+            <input type="text" id="domain-search" placeholder="搜索能力域…">
+            <button id="btn-rediscover" title="重新扫描能力域目录，挂载新发现的域并刷新全部域信号">重发现</button>
+          </div>
+          <div id="domain-cards"></div>
+        </div>
+        <div class="cap-detail" id="cap-detail">
+          <div class="placeholder" style="text-align:center;margin-top:40px;">
+            点击左侧能力域查看详情<br><br>（启用 / 停用 / 重启 · 工具列表 · 提示词）
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== ③ 数据与进程 ==================== -->
+    <section id="tab-data" class="tab-pane">
+      <div class="data-grid">
+        <div class="card">
+          <div class="card-title">📈 EventBus 统计</div>
+          <div class="kv-grid" id="data-busstats"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">🧩 能力域状态</div>
+          <div id="data-domains"></div>
+        </div>
+        <div class="card span-2">
+          <div class="card-title">⚙️ 运行中的子进程引擎</div>
+          <div id="data-processes"></div>
+        </div>
+        <div class="card span-2">
+          <div class="card-title">💬 最近消息（共享数据）</div>
+          <ul id="data-messages" class="plain-list"></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== ④ 记忆 ==================== -->
+    <section id="tab-memory" class="tab-pane">
+      <div class="memory-tabs">
+        <button class="mtab small active" data-mtab="persona">👤 人格</button>
+        <button class="mtab small" data-mtab="kernel">🧠 长期记忆</button>
+        <button class="mtab small" data-mtab="state">📊 状态</button>
+        <button class="mtab small" data-mtab="lorebook">📖 知识库</button>
+        <button class="mtab small" data-mtab="coding">💻 编程</button>
+        <button class="mtab small" data-mtab="capability">🔧 能力</button>
+        <button class="mtab small" data-mtab="prompt">📝 提示词</button>
+      </div>
+
+      <div id="mview-persona" class="mview active">
+        <div class="card"><div id="mem-persona"></div></div>
+      </div>
+      <div id="mview-kernel" class="mview">
+        <div class="card">
+          <div class="card-title">🧠 记忆内核状态 <span id="mk-path" class="cs-meta"></span>
+            <button id="btn-mk-refresh">刷新</button>
+          </div>
+          <div class="kv-grid" id="mk-status"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">⏳ 待确认建议（稳定记忆确认后才生效）</div>
+          <div id="mk-proposals"><div class="placeholder">加载中…</div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">➕ 手动添加长期记忆</div>
+          <div class="mk-form">
+            <select id="mk-add-track">
+              <option value="profile">profile · 用户档案</option>
+              <option value="global_fact">global_fact · 全局事实</option>
+              <option value="project_key">project_key · 项目记忆</option>
+              <option value="rule">rule · 行为规则</option>
+            </select>
+            <input id="mk-add-text" placeholder="要记住的内容…">
+            <input id="mk-add-reason" placeholder="原因（可选）">
+            <button id="btn-mk-add">添加</button>
+            <span id="mk-add-status" class="cs-meta"></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">📌 长期记忆条目 <span id="mk-items-count" class="cs-meta"></span></div>
+          <div id="mk-items"><div class="placeholder">加载中…</div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">🗂 最近轮次摘要 <span id="mk-turns-count" class="cs-meta"></span></div>
+          <div id="mk-turns"><div class="placeholder">加载中…</div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">🔍 记忆检索</div>
+          <div class="mk-form">
+            <input id="mk-search-q" placeholder="搜索关键词，例如：无糖可乐">
+            <button id="btn-mk-search">搜索</button>
+          </div>
+          <div id="mk-search-results"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">🧾 审计（最近 10 条）</div>
+          <ul id="mk-audit" class="plain-list"></ul>
+        </div>
+      </div>
+      <div id="mview-state" class="mview">
+        <div class="card"><div id="mem-state"></div></div>
+        <div class="card">
+          <div class="card-title">🕘 状态事件（state.db 审计）</div>
+          <ul id="mem-stateevents" class="plain-list"></ul>
+        </div>
+      </div>
+      <div id="mview-lorebook" class="mview">
+        <div class="card"><div id="mem-lorebook"></div></div>
+      </div>
+      <div id="mview-coding" class="mview">
+        <div class="card">
+          <div class="card-title">💻 编程会话（最近 10 条，点选查看步骤）</div>
+          <div id="mem-coding-sessions"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">🔍 执行步骤 <span id="mem-coding-sid" class="cs-meta"></span></div>
+          <ul id="mem-coding-steps" class="plain-list"></ul>
+        </div>
+      </div>
+      <div id="mview-capability" class="mview">
+        <div class="card">
+          <div class="card-title">🔧 自主能力登记表 <span id="cap-summary" class="cs-meta"></span></div>
+          <div id="mem-capability-list"></div>
+        </div>
+      </div>
+      <div id="mview-prompt" class="mview">
+        <div class="card">
+          <div class="prompt-switch">
+            <button class="ptab active" data-prompt="streamer">主播脑</button>
+            <button class="ptab" data-prompt="operator">操作脑</button>
+            <button class="ptab" data-prompt="will_engine">思维脑</button>
+          </div>
+          <pre id="mem-prompt"></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 意志脑 ==================== -->
+    <section id="tab-will" class="tab-pane">
+      <div class="card">
+        <div class="card-title">🫀 内在人格
+          <span id="will-signature" class="cs-meta"></span>
+          <button id="btn-will-refresh">刷新</button>
+          <button id="btn-will-export">导出报告</button>
+        </div>
+        <pre id="will-identity" class="will-pre"></pre>
+        <div id="will-export-status" class="cs-meta"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">🧾 最近决策（will_decisions + will_outcomes）</div>
+        <div id="will-decisions"><div class="placeholder">加载中…</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">📈 经验（当前状态签名）</div>
+        <div id="will-experience"><div class="placeholder">加载中…</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">🤝 常驻的人 / 作息</div>
+        <div id="will-bonds"><div class="placeholder">加载中…</div></div>
+        <pre id="will-routine" class="will-pre"></pre>
+        <div id="will-mode" class="cs-meta"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">🪞 记忆回放 / 我现在能做到的</div>
+        <pre id="will-replay" class="will-pre"></pre>
+        <pre id="will-knowledge" class="will-pre"></pre>
+      </div>
+    </section>
+
+    <!-- ==================== ⑤ 日志 ==================== -->
+    <section id="tab-logs" class="tab-pane">
+      <div class="log-layout">
+        <div class="log-side">
+          <div class="card">
+            <div class="card-title">📡 事件流</div>
+            <div class="event-filters">
+              <label><input type="checkbox" value="user_message" checked>USER</label>
+              <label><input type="checkbox" value="tts_speak" checked>AI</label>
+              <label><input type="checkbox" value="state_updated" checked>STATE</label>
+              <label><input type="checkbox" value="operator_done" checked>OP</label>
+              <label><input type="checkbox" value="operator_progress" checked>PROG</label>
+              <label><input type="checkbox" value="perception_updated" checked>PERCEPT</label>
+              <label><input type="checkbox" value="will_engine_decided" checked>DECIDE</label>
+              <label><input type="checkbox" value="domain_started" checked>DOM</label>
+            </div>
+            <ul id="event-log"></ul>
+          </div>
+        </div>
+        <div class="log-main">
+          <div class="card">
+            <div class="card-title">📜 运行日志</div>
+            <div class="log-filters">
+              <label><input type="checkbox" value="INFO" checked>INFO</label>
+              <label><input type="checkbox" value="WARNING" checked>WARN</label>
+              <label><input type="checkbox" value="ERROR" checked>ERR</label>
+            </div>
+            <ul id="log-list"></ul>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 全局对话输入栏（任何子界面可用） -->
+  <footer id="chatbar">
+    <div id="vision-strip" class="vision-strip" hidden>
+      <div class="vision-thumb" id="vision-thumb-screen" hidden>
+        <video id="vision-video-screen" autoplay playsinline muted></video>
+        <span>屏幕</span>
+      </div>
+      <div class="vision-thumb" id="vision-thumb-camera" hidden>
+        <video id="vision-video-camera" autoplay playsinline muted></video>
+        <span>摄像头</span>
+      </div>
+      <div class="vision-hint">发消息时会附带当前画面，仅抓一帧</div>
+    </div>
+    <div class="chatbar-inner">
+      <div id="chatbar-status" class="chatbar-status" title="最近对话"></div>
+      <form id="chat-form">
+        <div class="vision-controls">
+          <button type="button" id="vision-btn-screen" class="vision-btn"
+            title="共享屏幕：仅在发送消息时抓一帧">🖥</button>
+          <button type="button" id="vision-btn-camera" class="vision-btn"
+            title="打开摄像头：仅在发送消息时抓一帧">📷</button>
+        </div>
+        <select id="chat-source" title="消息来源">
+          <option value="webui">webui</option>
+          <option value="cli">cli</option>
+          <option value="pet">pet</option>
+        </select>
+        <textarea id="chat-input" rows="1"
+          placeholder="和维尔薇对话（Ctrl+Enter 发送）…"></textarea>
+        <button type="submit" id="chat-send">发送</button>
+      </form>
+    </div>
+  </footer>
+
+  <script src="/static/app.js?v=19"></script>
+</body>
+</html>

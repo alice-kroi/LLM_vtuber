@@ -1,0 +1,7 @@
+{
+  "id": "obs_control",
+  "label": "OBS 控制",
+  "version": "1.0.0",
+  "risk": "R3",
+  "builtin": true
+}

@@ -1,0 +1,10 @@
+{
+  "id": "stream_assist",
+  "label": "直播互动助手",
+  "version": "1.0.0",
+  "risk": "R1",
+  "builtin": true,
+  "smoke": {
+    "sa_list_highlights": {"limit": 3}
+  }
+}

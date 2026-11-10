@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from tool.tool_node import tool_schema
+from tool.tool_node import tool_schema  # noqa: F401  # 兼容旧导入路径（tool_schema 现迁至 LLM_v2.core.capability_domain）
 
 BROWSER_TOOL_NAMES = [
     "br_navigate",

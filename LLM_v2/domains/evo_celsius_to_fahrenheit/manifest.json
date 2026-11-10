@@ -1,0 +1,12 @@
+{
+  "id": "evo_celsius_to_fahrenheit",
+  "label": "将输入的摄氏温度数值转换为对应的华氏温度数值",
+  "version": "0.1.0",
+  "risk": "R0",
+  "builtin": false,
+  "evolved": true,
+  "description": "将输入的摄氏温度数值转换为对应的华氏温度数值",
+  "rev": 2,
+  "tool": "evo_celsius_to_fahrenheit",
+  "created_at": "2026-10-26 13:01:02"
+}

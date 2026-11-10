@@ -76,6 +76,51 @@ class SemanticCache:
             logger.debug(f"[语义缓存] embedding 失败: {e}")
             return None
 
+    # --------- P0-B：异步版本（embedding 放线程池，不阻塞事件循环） ---------
+    async def get_async(self, question: str) -> Tuple[Optional[str], bool]:
+        """异步查询缓存：embedding 计算在线程池执行，避免阻塞 asyncio 事件循环。"""
+        if not self.enabled or not question:
+            return None, False
+        import asyncio
+        qvec = await asyncio.to_thread(self._embed_query, question)
+        if not qvec:
+            return None, False
+        now = time.time()
+        best_sim = 0.0
+        best_resp = None
+        with self._lock:
+            for it in list(self._items):
+                if now - it["ts"] > self.ttl:
+                    self._items.remove(it)
+                    continue
+                sim = self._cosine(qvec, it["vec"])
+                if sim > best_sim:
+                    best_sim = sim
+                    best_resp = it["resp"]
+            if best_sim >= self.threshold and best_resp:
+                self._hits += 1
+                return best_resp, True
+            self._misses += 1
+            return None, False
+
+    async def put_async(self, question: str, response: str):
+        """异步写入缓存：embedding 计算在线程池执行。"""
+        if not self.enabled or not question or not response:
+            return
+        import asyncio
+        qvec = await asyncio.to_thread(self._embed_query, question)
+        if not qvec:
+            return
+        with self._lock:
+            if len(self._items) >= self.max_items:
+                self._items = self._items[-self.max_items // 2:]
+            self._items.append({
+                "q": question[:200],
+                "vec": qvec,
+                "resp": response,
+                "ts": time.time(),
+            })
+
     @staticmethod
     def _cosine(a, b):
         if np is not None:

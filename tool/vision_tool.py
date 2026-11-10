@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # --------- 可配置参数（由 config.ini [vision] 段覆盖） ---------
 _DEFAULT_ENABLED = True
-_DEFAULT_MODEL = "doubao-seed-1-6-vision-250815"
+_DEFAULT_MODEL = "doubao-seed-2-0-code-preview-260215"
 _DEFAULT_API_URL = ""
 _DEFAULT_API_KEY = ""
 _DEFAULT_SCREENSHOT_DIR = "./screenshots"
@@ -202,13 +202,18 @@ async def capture_window_screenshot(window_title: Optional[str] = None) -> Dict[
         }
 
 
-def _call_vision_model(image_base64: str, prompt: str) -> Dict[str, Any]:
+def _call_vision_model(
+    image_base64: str,
+    prompt: str,
+    mime_type: str = "image/png",
+) -> Dict[str, Any]:
     """
     调用豆包多模态模型分析图片（同步函数，供 asyncio.to_thread 使用）
 
     Args:
-        image_base64: base64 编码的图片
+        image_base64: base64 编码的图片，或完整的 data:image/... 数据 URL
         prompt: 分析提示词
+        mime_type: 图片 MIME 类型（仅在传入裸 base64 时使用）
 
     Returns:
         {
@@ -232,6 +237,13 @@ def _call_vision_model(image_base64: str, prompt: str) -> Dict[str, Any]:
             base_url=vision_config.api_url or "https://ark.cn-beijing.volces.com/api/v3"
         )
 
+        # 前端传来的是完整 data URL；工具内部截图传的是裸 base64
+        image_url = (
+            image_base64
+            if image_base64.startswith("data:image/")
+            else f"data:{mime_type};base64,{image_base64}"
+        )
+
         # 构建多模态消息
         messages = [
             {
@@ -245,7 +257,7 @@ def _call_vision_model(image_base64: str, prompt: str) -> Dict[str, Any]:
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/png;base64,{image_base64}"
+                            "url": image_url
                         }
                     }
                 ]

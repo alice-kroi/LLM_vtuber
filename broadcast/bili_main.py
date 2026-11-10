@@ -182,6 +182,8 @@ def convert_to_openai_message(message_data: Dict[str, Any]) -> Dict[str, Any]:
         "role": "user",
         "content": content,
         "name": user_name,
+        # P0-1：礼物/SC 属重要事件，供主程序投递过滤层优先放行（不被普通弹幕限流/丢弃）
+        "important": message_type in ("gift", "super_chat"),
     }
 
 

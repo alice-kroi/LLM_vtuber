@@ -1,0 +1,14 @@
+{
+  "name": "evo_celsius_to_fahrenheit",
+  "description": "将输入的摄氏温度数值转换为对应的华氏温度数值",
+  "parameters": {
+    "celsius": {
+      "type": "number",
+      "description": "需要转换的摄氏温度数值，可为整数或浮点数"
+    }
+  },
+  "required": [
+    "celsius"
+  ],
+  "timeout": 30
+}

@@ -1,0 +1,10 @@
+{
+  "id": "video_studio",
+  "label": "视频创作",
+  "version": "1.1.0",
+  "risk": "R1",
+  "builtin": true,
+  "smoke": {
+    "video_doctor": {}
+  }
+}

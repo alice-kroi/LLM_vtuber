@@ -1,0 +1,33 @@
+{
+  "_comment": "主题 → 权威站点。命中关键词时，检索会追加 site: 过滤词，减少无关结果。",
+  "topics": [
+    {
+      "keywords": ["sql注入", "sql 注入", "sqli", "injection", "注入攻击"],
+      "sites": ["owasp.org", "portswigger.net", "cwe.mitre.org"]
+    },
+    {
+      "keywords": ["xss", "跨站脚本", "csrf", "跨站请求"],
+      "sites": ["owasp.org", "portswigger.net", "developer.mozilla.org"]
+    },
+    {
+      "keywords": ["python", "asyncio", "pydantic", "fastapi", "typing"],
+      "sites": ["docs.python.org", "peps.python.org", "fastapi.tiangolo.com"]
+    },
+    {
+      "keywords": ["javascript", "typescript", "react", "node.js", "npm"],
+      "sites": ["developer.mozilla.org", "nodejs.org", "react.dev"]
+    },
+    {
+      "keywords": ["日语", "日本語", "语法", "假名", "jlpt"],
+      "sites": ["jisho.org", "jlptsensei.com", "tofugu.com"]
+    },
+    {
+      "keywords": ["docker", "kubernetes", "k8s", "容器"],
+      "sites": ["docs.docker.com", "kubernetes.io"]
+    },
+    {
+      "keywords": ["向量检索", "embedding", "rag", "milvus"],
+      "sites": ["milvus.io", "python.langchain.com", "huggingface.co"]
+    }
+  ]
+}

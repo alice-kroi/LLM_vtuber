@@ -1,0 +1,33 @@
+{
+  "version": "0.1",
+  "dataset_version": "todo",
+  "note": "检索指标与全部阈值缺口统一为 status=to_measure（待实测标定），未回填前不得作为回归门禁依据。",
+  "k_values": [5, 10],
+  "items": [
+    {"id": "R-01", "group": "retrieval", "item": "Recall@k", "standard": "标准答案所在文档出现在 Top-k", "verify": "gold_doc_ids 与检索前 k 名求交，命中记 1", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "R-02", "group": "retrieval", "item": "MRR", "standard": "首个相关结果排名的倒数均值", "verify": "每个 query 取首个命中 rank r，累加 1/r 后求均值", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "R-03", "group": "retrieval", "item": "NDCG@k", "standard": "折损后的排序质量与理想排序之比", "verify": "按相关度标签计 DCG@k / IDCG@k", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "R-04", "group": "retrieval", "item": "Precision@k", "standard": "Top-k 中相关条目占比", "verify": "相关条目数 / k", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "R-05", "group": "retrieval", "item": "检索延迟 P95", "standard": "单次检索 P95 耗时", "verify": "逐条计时后取 P95", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "G-01", "group": "generation", "item": "Faithfulness", "standard": "答案陈述被上下文支持的比例", "verify": "Ragas Faithfulness", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "G-02", "group": "generation", "item": "Answer Relevancy", "standard": "答案与问题的贴合程度", "verify": "Ragas Answer Relevancy", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "G-03", "group": "generation", "item": "Context Precision", "standard": "上下文中有效部分的排位质量", "verify": "Ragas Context Precision", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "G-04", "group": "generation", "item": "Context Recall", "standard": "参考答案所需信息被覆盖比例", "verify": "Ragas Context Recall", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "G-05", "group": "generation", "item": "拒答行为", "standard": "无依据时必须明说且不编造", "verify": "5 条无答案问题检查拒答措辞与事实断言", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "C-01", "group": "chunking", "item": "Chunk 长度分布", "standard": "chunk 长度落在设计区间且无超长块", "verify": "统计 token 数 P50/P95/max", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "C-02", "group": "chunking", "item": "Chunk overlap", "standard": "相邻块存在重叠避免断句", "verify": "抽 50 对相邻 chunk 检查首尾重复", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "C-03", "group": "chunking", "item": "元数据完整性", "standard": "每块可溯源 doc_id/source/offset", "verify": "遍历向量库统计缺字段条目", "threshold": "缺失率 0%", "status": "fixed"},
+    {"id": "C-04", "group": "chunking", "item": "Embedding 一致性", "standard": "索引与查询模型维度一致", "verify": "比对两侧 dimension", "threshold": "维度必须相等", "status": "fixed"},
+    {"id": "C-05", "group": "chunking", "item": "索引新鲜度", "standard": "文档更新在约定周期内可检索", "verify": "改测试文档后轮询命中并记录耗时", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "E-01", "group": "dataset", "item": "三元组字段完整", "standard": "含 question/reference_answer/gold_doc_ids", "verify": "逐条校验字段非空", "threshold": "缺失率 0%", "status": "fixed"},
+    {"id": "E-02", "group": "dataset", "item": "gold_doc_ids 有效性", "standard": "标注文档 ID 在索引中存在", "verify": "查向量库确认存在", "threshold": "有效率 100%", "status": "fixed"},
+    {"id": "E-03", "group": "dataset", "item": "题型覆盖", "standard": "事实/多跳/无答案/长尾均有样本", "verify": "按 type 统计占比", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "E-04", "group": "dataset", "item": "规模", "standard": "样本量使指标波动可控", "verify": "两次重复跑比对分差", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "E-05", "group": "dataset", "item": "无答案样本比例", "standard": "负样本占比不可忽略", "verify": "统计 no_answer 占比", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "O-01", "group": "ops", "item": "评测可复现", "standard": "重跑指标漂移在可接受范围", "verify": "连跑两遍全量比对差值", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "O-02", "group": "ops", "item": "判定器一致性", "standard": "LLM 裁判与人工一致", "verify": "抽 30 条人工标注算一致率", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "O-03", "group": "ops", "item": "回归门禁", "standard": "指标跌破红线时 CI 失败", "verify": "脚本对指标做断言", "threshold": "to_measure", "status": "to_measure"},
+    {"id": "O-04", "group": "ops", "item": "失败样例留存", "standard": "未通过样本必须落盘", "verify": "检查输出目录含 failed 明细", "threshold": "必须存在", "status": "fixed"},
+    {"id": "O-05", "group": "ops", "item": "成本与耗时", "standard": "单次评测成本时长在预算内", "verify": "记录 token 与 wall-clock", "threshold": "to_measure", "status": "to_measure"}
+  ]
+}

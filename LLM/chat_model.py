@@ -80,6 +80,19 @@ class ChatState(TypedDict):
 
 
 # --------- 通用工具 ---------
+def _content_text_len(content) -> int:
+    """统计消息文本长度；多模态 content 只算 text 部分，不把 base64 当字符数。"""
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        return sum(
+            len(str(part.get("text", "")))
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return 0
+
+
 def _build_openai_messages(state: ChatState) -> list:
     """
     从 ChatState 构建 OpenAI 兼容的消息列表，并做长度保护（截断老消息）
@@ -115,7 +128,9 @@ def _build_openai_messages(state: ChatState) -> list:
 
     # 长度保护：从最老的历史开始丢，直到总字符量<=上限
     while system_prompt and history_msgs:
-        total = len(system_prompt) + sum(len(m.get("content", "")) for m in history_msgs)
+        total = len(system_prompt) + sum(
+            _content_text_len(m.get("content")) for m in history_msgs
+        )
         if total <= MAX_HISTORY_CHARS:
             break
         # 丢最老的非system消息（保留最近的）
@@ -205,11 +220,23 @@ def _call_chat_api_with_retry(state: ChatState, api_key: str, base_url: str,
             if hasattr(msg, "tool_calls") and msg.tool_calls:
                 tool_calls = []
                 for tc in msg.tool_calls:
-                    tool_calls.append({
+                    raw_args = tc.function.arguments if tc.function else ""
+                    parsed_args, arg_err = {}, ""
+                    if raw_args:
+                        try:
+                            parsed_args = json.loads(raw_args)
+                        except Exception as e:  # noqa: BLE001
+                            # 参数被 max_tokens 截断时 JSON 不闭合：不在这里崩掉整轮，
+                            # 交给调用方（CodingLoop）识别并改成小步写入
+                            arg_err = str(e)
+                    item = {
                         "tool_call_id": tc.id,
                         "name": tc.function.name,
-                        "arguments": json.loads(tc.function.arguments) if tc.function.arguments else {}
-                    })
+                        "arguments": parsed_args,
+                    }
+                    if arg_err:
+                        item["arguments_error"] = arg_err
+                    tool_calls.append(item)
 
             tokens = _parse_usage(getattr(resp_obj, "usage", None))
             return {"response": ai_resp, "tokens_used": tokens, "tool_calls": tool_calls}
@@ -416,11 +443,13 @@ def doubao_chat_node(state: ChatState, tools: list = None) -> dict:
         tools: OpenAI function calling 格式的工具列表，None 表示不传 tools
     """
     try:
-        api_key = os.getenv("Doubao_API_KEY")
-        api_base = os.getenv("Doubao_API_URL", "https://api.doubao.com/v1/")
+        # state 可显式携带端点（V2 LLMAdapter 用它隔离主模型与视觉/embedding）
+        api_key = state.get("api_key") or os.getenv("Doubao_API_KEY")
+        api_base = (state.get("api_url")
+                    or os.getenv("Doubao_API_URL", "https://api.doubao.com/v1/"))
 
         if not api_key:
-            raise ValueError("环境变量 Doubao_API_KEY 未设置")
+            raise ValueError("环境变量 Doubao_API_KEY / state.api_key 未设置")
 
         result = _call_chat_api_with_retry(state, api_key=api_key, base_url=api_base,
                                            tools=tools)

@@ -1,0 +1,10 @@
+{
+  "id": "clip_maker",
+  "label": "直播切片",
+  "version": "1.0.0",
+  "risk": "R1",
+  "builtin": true,
+  "smoke": {
+    "clip_list": {"limit": 3}
+  }
+}

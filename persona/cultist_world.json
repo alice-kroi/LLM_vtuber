@@ -1,0 +1,1326 @@
+{
+ "updated_at": "2026-11-09 23:04:23",
+ "legacy": {
+  "id": "aspirant",
+  "label": "有志青年"
+ },
+ "state": {
+  "legacy": null,
+  "legacy_label": null,
+  "cards": [],
+  "verbs": [],
+  "next_event": null
+ },
+ "cards": {
+  "introjob": {
+   "seen": 11,
+   "label": "卑微的雇工之职",
+   "aspects": {
+    "job": 1
+   },
+   "description": "医院搬工之职，并不稳定。虽悲惨，却也是你当下唯一的选择。",
+   "last_seen": "2026-11-09 22:51:51"
+  },
+  "health": {
+   "seen": 54,
+   "label": "健康",
+   "aspects": {
+    "ability": 1,
+    "heart": 2,
+    "ingredient": 1
+   },
+   "description": "属于我的这具身体。世间存在各种各样的身体，但这一具是属于我的。我的头脑需要它，正如菌菇需要泥土。[你可以用足量的活力获得更多健康。]",
+   "last_seen": "2026-11-09 23:00:36"
+  },
+  "funds": {
+   "seen": 181,
+   "label": "资金",
+   "aspects": {
+    "ingredient": 1
+   },
+   "description": "足够供我舒舒服服地生活一小段时间。",
+   "last_seen": "2026-11-09 23:01:22"
+  },
+  "contentment": {
+   "seen": 32,
+   "label": "安逸",
+   "aspects": {
+    "lantern": 2,
+    "heart": 2,
+    "influence": 1
+   },
+   "description": "我很开心，大概吧。[安逸可以抵御恐惧，但安逸难以久存。]",
+   "last_seen": "2026-11-09 22:54:13"
+  },
+  "passion": {
+   "seen": 75,
+   "label": "激情",
+   "aspects": {
+    "ability": 1,
+    "moth": 2,
+    "ingredient": 1
+   },
+   "description": "“迟钝的头脑既缺乏直觉，也不通逻辑。”——布莱士·帕斯卡 [如果你拥有足量的“灵感”，你可以通过研究获得更多“激情”。]",
+   "last_seen": "2026-11-09 23:03:30"
+  },
+  "reason": {
+   "seen": 91,
+   "label": "理性",
+   "aspects": {
+    "lantern": 2,
+    "ingredient": 1,
+    "ability": 1
+   },
+   "description": "“在完全现实的情况下，有机体不可能长久地存活下去。”——雪莉·杰克逊 [博闻能够用于研究并凭之提升理性。]",
+   "last_seen": "2026-11-09 23:03:30"
+  },
+  "bequestintro": {
+   "seen": 10,
+   "label": "一份遗赠",
+   "aspects": {
+    "legacyplotitem": 1
+   },
+   "description": "包裹中夹着我通信者的遗嘱执行人留下的诡异书页。我必须以理性或以激情来研究它。",
+   "last_seen": "2026-11-09 22:53:44"
+  },
+  "passionexhausted": {
+   "seen": 9,
+   "label": "激情（枯竭）",
+   "aspects": {
+    "exhausted.passion": 1
+   },
+   "description": "激情之火衰弱不振。[此卡不可使用，将于六十秒后复原。]",
+   "last_seen": "2026-11-09 22:53:45"
+  },
+  "glimmering": {
+   "seen": 24,
+   "label": "灵感",
+   "aspects": {
+    "moth": 1,
+    "influence": 1,
+    "advancement": 1
+   },
+   "description": "我的情绪比平常更为高昂。有些事物我永远也不会理解，因而永远都那么珍贵，而如今我离它们更近了一点。[在研究中使用“灵感”可获得“激情”。如果不使用，将会在三分钟后消失。]",
+   "last_seen": "2026-11-09 22:34:04"
+  },
+  "fragmentlantern": {
+   "seen": 22,
+   "label": "守夜人的秘密",
+   "aspects": {
+    "lantern": 2,
+    "subvertable_lore": 1,
+    "challenge.knowledge": 1,
+    "lore": 1
+   },
+   "description": "其表述如下：“司辰各有其颜色，但颜色只存在于有光的地方。”",
+   "last_seen": "2026-11-09 23:03:30"
+  },
+  "contactintro": {
+   "seen": 83,
+   "label": "关于潜在合作者的笔记",
+   "aspects": {
+    "legacyplotitem": 1
+   },
+   "description": "来信者记录了他对我的观察。他相信我有“潜能”。同样的，他也记录了他对另一个人的观察。经过一定的时间与学习，我应该能找出那人的下落。",
+   "last_seen": "2026-11-09 23:03:30"
+  },
+  "ascensionenlightenmenta": {
+   "seen": 47,
+   "label": "诱惑：启明",
+   "aspects": {
+    "desire": 1,
+    "enlightenmentmarks": 1,
+    "uqdesire": 1
+   },
+   "description": "我突然意识到我手里握着前往智慧的钥匙。[此卡可通达“启明胜利”，只要将其升级到一定程度。以之“入梦”可以使之升级或转变。]",
+   "last_seen": "2026-11-09 23:03:30"
+  },
+  "mapbookdealer": {
+   "seen": 83,
+   "label": "去往莫兰书店的路线",
+   "aspects": {
+    "legacyplotitem": 1
+   },
+   "description": "语焉不详的路线说明，教人如何去往某个不为人知的地址，找到名为莫兰的稀有书籍商贩。",
+   "last_seen": "2026-11-09 23:03:30"
+  },
+  "fleeting": {
+   "seen": 29,
+   "label": "一瞬追忆",
+   "aspects": {
+    "moth": 2,
+    "influence": 1,
+    "memory": 1,
+    "secrethistories": 2
+   },
+   "description": "回首某个瞬间。下个瞬间即告消逝。",
+   "last_seen": "2026-11-09 22:58:41"
+  },
+  "fatigue": {
+   "seen": 12,
+   "label": "健康（疲劳）",
+   "aspects": {
+    "heart": 1,
+    "illhealth": 1
+   },
+   "description": "此卡不可使用，将会在六十秒后复原。我能通过入梦令其更快恢复。",
+   "last_seen": "2026-11-09 22:53:13"
+  },
+  "vitality": {
+   "seen": 23,
+   "label": "活力",
+   "aspects": {
+    "heart": 1,
+    "advancement": 1,
+    "influence": 1
+   },
+   "description": "锻炼，或者其他更少见的东西，令我精神振奋。[与另一张“活力”一同使用可提升技能。如果不使用，将会在三分钟后消失。]",
+   "last_seen": "2026-11-09 22:54:13"
+  },
+  "decrepitude": {
+   "seen": 33,
+   "label": "衰老",
+   "aspects": {
+    "ability": 1,
+    "remnant": 1,
+    "winter": 1
+   },
+   "description": "有些伤口永远不会完全愈合。[没能及时处理的伤口和饥饿会转变为衰老，且永远不会恢复为健康。衰老在你死亡之前会一直存在。]",
+   "last_seen": "2026-11-09 22:43:55"
+  },
+  "dread": {
+   "seen": 29,
+   "label": "恐惧",
+   "aspects": {
+    "inducesdespair": 1,
+    "influence": 1,
+    "edge": 2,
+    "memory": 1,
+    "illhealth": 1
+   },
+   "description": "我已经见得太多了。不知名的恐惧正在用利齿啃噬着我的希望；一种关于存在本身的的恐惧。",
+   "last_seen": "2026-11-09 23:00:36"
+  },
+  "gloverandgloverjuniorjob": {
+   "seen": 7,
+   "label": "坐上格洛弗父子公司的高层职位",
+   "aspects": {
+    "job": 1
+   },
+   "description": "我的才智必须被用到更合适的地方去！不过至少……现在的工资比干苦力的要多一些。[经常旷工会有降职之虞。]",
+   "last_seen": "2026-11-09 22:43:41"
+  },
+  "affliction": {
+   "seen": 2,
+   "label": "病痛",
+   "aspects": {
+    "illhealth": 1,
+    "ingredient": 1,
+    "winter": 2
+   },
+   "description": "疾病令我虚弱。要想恢复，我需要休息和有营养的食物。[在“病痛”退化前将其入梦也可恢复“健康”。]",
+   "last_seen": "2026-11-09 23:03:30"
+  }
+ },
+ "verbs": {
+  "work": {
+   "seen": 136,
+   "slots": [
+    "work"
+   ],
+   "label": "作业",
+   "last_seen": "2026-11-09 23:03:30"
+  },
+  "dream": {
+   "seen": 123,
+   "slots": [
+    "dream"
+   ],
+   "label": "入梦",
+   "last_seen": "2026-11-09 23:03:30"
+  },
+  "study": {
+   "seen": 116,
+   "slots": [
+    "study"
+   ],
+   "label": "研究",
+   "last_seen": "2026-11-09 23:03:30"
+  },
+  "time": {
+   "seen": 97,
+   "slots": [
+    "expenses"
+   ],
+   "label": "时间流逝",
+   "last_seen": "2026-11-09 23:03:30"
+  },
+  "despair": {
+   "seen": 42,
+   "slots": [
+    "thoughts"
+   ],
+   "label": "绝望",
+   "last_seen": "2026-11-09 23:03:30"
+  },
+  "suspicion": {
+   "seen": 20,
+   "slots": [
+    "clues"
+   ],
+   "label": "好奇的少数人",
+   "last_seen": "2026-11-09 23:01:22"
+  },
+  "visions": {
+   "seen": 30,
+   "slots": [
+    "shadows"
+   ],
+   "label": "世界恢复如常",
+   "last_seen": "2026-11-09 23:03:30"
+  },
+  "illhealth": {
+   "seen": 14,
+   "slots": [
+    "starvation"
+   ],
+   "label": "健康已耗尽",
+   "last_seen": "2026-11-09 23:03:30"
+  },
+  "craving": {
+   "seen": 11,
+   "slots": [
+    "obsessions"
+   ],
+   "label": "守夜人的足迹",
+   "last_seen": "2026-11-09 22:58:41"
+  },
+  "rose": {
+   "seen": 5,
+   "slots": [],
+   "label": "独处",
+   "last_seen": "2026-11-09 22:53:54"
+  }
+ },
+ "recipes": [
+  {
+   "verb_id": "work",
+   "verb_label": "医院里的又一次轮班",
+   "recipe": "医院里的又一次轮班",
+   "inputs": [
+    "introjob"
+   ],
+   "outputs": [
+    {
+     "label": "健康",
+     "quantity": 1
+    },
+    {
+     "label": "资金",
+     "quantity": 2
+    }
+   ],
+   "count": 1,
+   "at": "2026-11-09 22:30:17"
+  },
+  {
+   "verb_id": "study",
+   "verb_label": "用理性检查遗赠",
+   "recipe": "用理性检查遗赠",
+   "inputs": [
+    "reason",
+    "bequestintro"
+   ],
+   "outputs": [
+    {
+     "label": "理性",
+     "quantity": 1
+    },
+    {
+     "label": "守夜人的秘密",
+     "quantity": 1
+    },
+    {
+     "label": "关于潜在合作者的笔记",
+     "quantity": 1
+    },
+    {
+     "label": "诱惑：启明",
+     "quantity": 1
+    },
+    {
+     "label": "去往莫兰书店的路线",
+     "quantity": 1
+    }
+   ],
+   "count": 1,
+   "at": "2026-11-09 22:31:12"
+  },
+  {
+   "verb_id": "dream",
+   "verb_label": "思忖我对非此世知识的追求",
+   "recipe": "思忖我对非此世知识的追求",
+   "inputs": [
+    "ascensionenlightenmenta"
+   ],
+   "outputs": [
+    {
+     "label": "诱惑：启明",
+     "quantity": 1
+    }
+   ],
+   "count": 1,
+   "at": "2026-11-09 22:32:40"
+  },
+  {
+   "verb_id": "dream",
+   "verb_label": "思忖我对非此世知识的追求",
+   "recipe": "思忖我对非此世知识的追求",
+   "inputs": [
+    "ascensionenlightenmenta"
+   ],
+   "outputs": [
+    {
+     "label": "诱惑：启明",
+     "quantity": 1
+    }
+   ],
+   "count": 1,
+   "at": "2026-11-09 22:33:57"
+  },
+  {
+   "verb_id": "work",
+   "verb_label": "做粗重活计",
+   "recipe": "做粗重活计",
+   "inputs": [
+    "health"
+   ],
+   "outputs": [
+    {
+     "label": "健康（疲劳）",
+     "quantity": 1
+    },
+    {
+     "label": "资金",
+     "quantity": 1
+    },
+    {
+     "label": "活力",
+     "quantity": 1
+    }
+   ],
+   "count": 1,
+   "at": "2026-11-09 22:35:04"
+  },
+  {
+   "verb_id": "dream",
+   "verb_label": "思忖我对非此世知识的追求",
+   "recipe": "思忖我对非此世知识的追求",
+   "inputs": [
+    "ascensionenlightenmenta"
+   ],
+   "outputs": [
+    {
+     "label": "诱惑：启明",
+     "quantity": 1
+    }
+   ],
+   "count": 1,
+   "at": "2026-11-09 22:35:12"
+  },
+  {
+   "verb_id": "dream",
+   "verb_label": "思忖我对非此世知识的追求",
+   "recipe": "思忖我对非此世知识的追求",
+   "inputs": [
+    "ascensionenlightenmenta"
+   ],
+   "outputs": [
+    {
+     "label": "诱惑：启明",
+     "quantity": 1
+    }
+   ],
+   "count": 1,
+   "at": "2026-11-09 23:03:30"
+  },
+  {
+   "verb_id": "dream",
+   "verb_label": "思忖我对非此世知识的追求",
+   "recipe": "思忖我对非此世知识的追求",
+   "inputs": [
+    "ascensionenlightenmenta"
+   ],
+   "outputs": [
+    {
+     "label": "诱惑：启明",
+     "quantity": 1
+    }
+   ],
+   "count": 1,
+   "at": "2026-11-09 22:41:50"
+  },
+  {
+   "verb_id": "work",
+   "verb_label": "找一份文书工作",
+   "recipe": "找一份文书工作",
+   "inputs": [
+    "reason"
+   ],
+   "outputs": [
+    {
+     "label": "理性",
+     "quantity": 1
+    },
+    {
+     "label": "坐上格洛弗父子公司的高层职位",
+     "quantity": 1
+    }
+   ],
+   "count": 1,
+   "at": "2026-11-09 22:42:02"
+  },
+  {
+   "verb_id": "work",
+   "verb_label": "格洛弗父子公司的高层工作",
+   "recipe": "格洛弗父子公司的高层工作",
+   "inputs": [
+    "gloverandgloverjuniorjob"
+   ],
+   "outputs": [
+    {
+     "label": "坐上格洛弗父子公司的高层职位",
+     "quantity": 1
+    }
+   ],
+   "count": 1,
+   "at": "2026-11-09 22:43:31"
+  },
+  {
+   "verb_id": "dream",
+   "verb_label": "月照之途",
+   "recipe": "月照之途",
+   "inputs": [
+    "passion"
+   ],
+   "outputs": [
+    {
+     "label": "安逸",
+     "quantity": 1
+    },
+    {
+     "label": "激情",
+     "quantity": 1
+    }
+   ],
+   "count": 1,
+   "at": "2026-11-09 22:52:13"
+  },
+  {
+   "verb_id": "work",
+   "verb_label": "格洛弗父子公司的高层工作",
+   "recipe": "格洛弗父子公司的高层工作",
+   "inputs": [
+    "gloverandgloverjuniorjob"
+   ],
+   "outputs": [],
+   "count": 0,
+   "at": "2026-11-09 22:43:41"
+  },
+  {
+   "verb_id": "work",
+   "verb_label": "医院里的又一次轮班",
+   "recipe": "医院里的又一次轮班",
+   "inputs": [
+    "introjob"
+   ],
+   "outputs": [
+    {
+     "label": "健康",
+     "quantity": 1
+    },
+    {
+     "label": "资金",
+     "quantity": 2
+    }
+   ],
+   "count": 1,
+   "at": "2026-11-09 22:51:57"
+  },
+  {
+   "verb_id": "work",
+   "verb_label": "做粗重活计",
+   "recipe": "做粗重活计",
+   "inputs": [
+    "health"
+   ],
+   "outputs": [
+    {
+     "label": "健康（疲劳）",
+     "quantity": 1
+    },
+    {
+     "label": "资金",
+     "quantity": 1
+    },
+    {
+     "label": "活力",
+     "quantity": 1
+    }
+   ],
+   "count": 1,
+   "at": "2026-11-09 22:52:40"
+  },
+  {
+   "verb_id": "dream",
+   "verb_label": "月照之途",
+   "recipe": "月照之途",
+   "inputs": [
+    "passion"
+   ],
+   "outputs": [
+    {
+     "label": "激情（枯竭）",
+     "quantity": 1
+    },
+    {
+     "label": "安逸",
+     "quantity": 1
+    }
+   ],
+   "count": 1,
+   "at": "2026-11-09 22:53:41"
+  },
+  {
+   "verb_id": "study",
+   "verb_label": "用理性检查遗赠",
+   "recipe": "用理性检查遗赠",
+   "inputs": [
+    "reason",
+    "bequestintro"
+   ],
+   "outputs": [
+    {
+     "label": "理性",
+     "quantity": 1
+    },
+    {
+     "label": "守夜人的秘密",
+     "quantity": 1
+    },
+    {
+     "label": "关于潜在合作者的笔记",
+     "quantity": 1
+    },
+    {
+     "label": "诱惑：启明",
+     "quantity": 1
+    },
+    {
+     "label": "去往莫兰书店的路线",
+     "quantity": 1
+    }
+   ],
+   "count": 1,
+   "at": "2026-11-09 22:53:54"
+  },
+  {
+   "verb_id": "dream",
+   "verb_label": "思忖我对非此世知识的追求",
+   "recipe": "思忖我对非此世知识的追求",
+   "inputs": [
+    "ascensionenlightenmenta"
+   ],
+   "outputs": [
+    {
+     "label": "诱惑：启明",
+     "quantity": 1
+    }
+   ],
+   "count": 1,
+   "at": "2026-11-09 22:56:08"
+  }
+ ],
+ "moves": [
+  {
+   "card_id": "!introjob_2",
+   "card_label": "卑微的雇工之职",
+   "element_id": "introjob",
+   "verb_id": "work",
+   "verb_label": "作业",
+   "slot": "work",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:30:10"
+  },
+  {
+   "card_id": "!passion_11",
+   "card_label": "激情",
+   "element_id": "passion",
+   "verb_id": "dream",
+   "verb_label": "入梦",
+   "slot": "dream",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:30:34"
+  },
+  {
+   "card_id": "!bequestintro_19",
+   "card_label": "一份遗赠",
+   "element_id": "bequestintro",
+   "verb_id": "study",
+   "verb_label": "研究",
+   "slot": "study",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:30:51"
+  },
+  {
+   "card_id": "!reason_18",
+   "card_label": "理性",
+   "element_id": "reason",
+   "verb_id": "study",
+   "verb_label": "研究",
+   "slot": "approach",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:30:55"
+  },
+  {
+   "card_id": "!ascensionenlightenmenta_36",
+   "card_label": "诱惑：启明",
+   "element_id": "ascensionenlightenmenta",
+   "verb_id": "dream",
+   "verb_label": "入梦",
+   "slot": "dream",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:31:16"
+  },
+  {
+   "card_id": "!fragmentlantern_34",
+   "card_label": "守夜人的秘密",
+   "element_id": "fragmentlantern",
+   "verb_id": "study",
+   "verb_label": "研究",
+   "slot": "study",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:31:28"
+  },
+  {
+   "card_id": "!reason_18",
+   "card_label": "理性",
+   "element_id": "reason",
+   "verb_id": "study",
+   "verb_label": "增长关于无形之术的知识？",
+   "slot": "with",
+   "ok": false,
+   "error": "HTTP 400: {\r\n  \"message\": \"One or more errors occurred. (Exception has been thrown by the target of an invocation.)\"\r\n}",
+   "at": "2026-11-09 22:31:37"
+  },
+  {
+   "card_id": "!fragmentlantern_34",
+   "card_label": "守夜人的秘密",
+   "element_id": "fragmentlantern",
+   "verb_id": "study",
+   "verb_label": "增长关于无形之术的知识？",
+   "slot": "with",
+   "ok": false,
+   "error": "卡片移动后从桌面消失，该槽位可能不接受这张卡",
+   "at": "2026-11-09 22:32:30"
+  },
+  {
+   "card_id": "!ascensionenlightenmenta_36",
+   "card_label": "诱惑：启明",
+   "element_id": "ascensionenlightenmenta",
+   "verb_id": "dream",
+   "verb_label": "入梦",
+   "slot": "dream",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:32:45"
+  },
+  {
+   "card_id": "!glimmering_25",
+   "card_label": "灵感",
+   "element_id": "glimmering",
+   "verb_id": "study",
+   "verb_label": "研究",
+   "slot": "study",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:32:57"
+  },
+  {
+   "card_id": "!passion_11",
+   "card_label": "激情",
+   "element_id": "passion",
+   "verb_id": "study",
+   "verb_label": "增进我的激情？",
+   "slot": "moreglimmering",
+   "ok": false,
+   "error": "HTTP 400: {\r\n  \"message\": \"One or more errors occurred. (Exception has been thrown by the target of an invocation.)\"\r\n}",
+   "at": "2026-11-09 22:33:05"
+  },
+  {
+   "card_id": "!health_4",
+   "card_label": "健康",
+   "element_id": "health",
+   "verb_id": "work",
+   "verb_label": "作业",
+   "slot": "work",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:33:39"
+  },
+  {
+   "card_id": "!ascensionenlightenmenta_36",
+   "card_label": "诱惑：启明",
+   "element_id": "ascensionenlightenmenta",
+   "verb_id": "dream",
+   "verb_label": "入梦",
+   "slot": "dream",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:34:00"
+  },
+  {
+   "card_id": "!ascensionenlightenmenta_36",
+   "card_label": "诱惑：启明",
+   "element_id": "ascensionenlightenmenta",
+   "verb_id": "dream",
+   "verb_label": "入梦",
+   "slot": "dream",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:35:16"
+  },
+  {
+   "card_id": "!fleeting_67",
+   "card_label": "一瞬追忆",
+   "element_id": "fleeting",
+   "verb_id": "dream",
+   "verb_label": "思忖我对非此世知识的追求",
+   "slot": "reflection",
+   "ok": false,
+   "error": "HTTP 400: {\r\n  \"message\": \"One or more errors occurred. (Exception has been thrown by the target of an invocation.)\"\r\n}",
+   "at": "2026-11-09 22:35:23"
+  },
+  {
+   "card_id": "!ascensionenlightenmenta_36",
+   "card_label": "诱惑：启明",
+   "element_id": "ascensionenlightenmenta",
+   "verb_id": "dream",
+   "verb_label": "入梦",
+   "slot": "dream",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:40:24"
+  },
+  {
+   "card_id": "!restlessness_113",
+   "card_label": "恐惧",
+   "element_id": "dread",
+   "verb_id": "dream",
+   "verb_label": "思忖我对非此世知识的追求",
+   "slot": "reflection",
+   "ok": false,
+   "error": "HTTP 400: {\r\n  \"message\": \"One or more errors occurred. (Exception has been thrown by the target of an invocation.)\"\r\n}",
+   "at": "2026-11-09 22:40:32"
+  },
+  {
+   "card_id": "!health_4",
+   "card_label": "衰老",
+   "element_id": "decrepitude",
+   "verb_id": "work",
+   "verb_label": "作业",
+   "slot": "work",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:40:44"
+  },
+  {
+   "card_id": "!reason_18",
+   "card_label": "理性",
+   "element_id": "reason",
+   "verb_id": "work",
+   "verb_label": "作业",
+   "slot": "work",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:41:44"
+  },
+  {
+   "card_id": "!gloverandgloverjuniorjob_137",
+   "card_label": "坐上格洛弗父子公司的高层职位",
+   "element_id": "gloverandgloverjuniorjob",
+   "verb_id": "work",
+   "verb_label": "作业",
+   "slot": "work",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:42:25"
+  },
+  {
+   "card_id": "!passion_11",
+   "card_label": "激情",
+   "element_id": "passion",
+   "verb_id": "dream",
+   "verb_label": "入梦",
+   "slot": "dream",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:42:53"
+  },
+  {
+   "card_id": "!ascensionenlightenmenta_36",
+   "card_label": "诱惑：启明",
+   "element_id": "ascensionenlightenmenta",
+   "verb_id": "dream",
+   "verb_label": "月照之途",
+   "slot": "lore",
+   "ok": false,
+   "error": "HTTP 400: {\r\n  \"message\": \"One or more errors occurred. (Exception has been thrown by the target of an invocation.)\"\r\n}",
+   "at": "2026-11-09 22:43:14"
+  },
+  {
+   "card_id": "!gloverandgloverjuniorjob_137",
+   "card_label": "坐上格洛弗父子公司的高层职位",
+   "element_id": "gloverandgloverjuniorjob",
+   "verb_id": "work",
+   "verb_label": "作业",
+   "slot": "work",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:43:37"
+  },
+  {
+   "card_id": "!reason_18",
+   "card_label": "理性",
+   "element_id": "reason",
+   "verb_id": "work",
+   "verb_label": "格洛弗父子公司的高层工作",
+   "slot": "diligence",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:43:47"
+  },
+  {
+   "card_id": "!introjob_3",
+   "card_label": "卑微的雇工之职",
+   "element_id": "introjob",
+   "verb_id": "work",
+   "verb_label": "作业",
+   "slot": "work",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:51:48"
+  },
+  {
+   "card_id": "!health_5",
+   "card_label": "健康",
+   "element_id": "health",
+   "verb_id": "work",
+   "verb_label": "作业",
+   "slot": "work",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:52:01"
+  },
+  {
+   "card_id": "!passion_13",
+   "card_label": "激情",
+   "element_id": "passion",
+   "verb_id": "dream",
+   "verb_label": "入梦",
+   "slot": "dream",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:52:18"
+  },
+  {
+   "card_id": "!funds_6",
+   "card_label": "资金",
+   "element_id": "funds",
+   "verb_id": "time",
+   "verb_label": "时间流逝",
+   "slot": "expenses",
+   "ok": false,
+   "error": "HTTP 400: {\r\n  \"message\": \"One or more errors occurred. (Exception has been thrown by the target of an invocation.)\"\r\n}",
+   "at": "2026-11-09 22:52:48"
+  },
+  {
+   "card_id": "!reason_30",
+   "card_label": "理性",
+   "element_id": "reason",
+   "verb_id": "study",
+   "verb_label": "研究",
+   "slot": "study",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:53:13"
+  },
+  {
+   "card_id": "!bequestintro_31",
+   "card_label": "一份遗赠",
+   "element_id": "bequestintro",
+   "verb_id": "study",
+   "verb_label": "阅读手边的随便什么文字",
+   "slot": "study",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:53:28"
+  },
+  {
+   "card_id": "!reason_30",
+   "card_label": "理性",
+   "element_id": "reason",
+   "verb_id": "study",
+   "verb_label": "研究",
+   "slot": "approach",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:53:35"
+  },
+  {
+   "card_id": "!ascensionenlightenmenta_61",
+   "card_label": "诱惑：启明",
+   "element_id": "ascensionenlightenmenta",
+   "verb_id": "dream",
+   "verb_label": "入梦",
+   "slot": "dream",
+   "ok": true,
+   "error": "",
+   "at": "2026-11-09 22:54:09"
+  },
+  {
+   "card_id": "!health_5",
+   "card_label": "健康",
+   "element_id": "health",
+   "verb_id": "work",
+   "verb_label": "作业",
+   "slot": "work",
+   "ok": false,
+   "error": "HTTP 404: {\r\n  \"message\": \"One or more errors occurred. (No token found at path \\\"~/tabletop!health_5\\\".)\"\r\n}",
+   "at": "2026-11-09 22:56:57"
+  },
+  {
+   "card_id": "!ascensionenlightenmenta_61",
+   "card_label": "诱惑：启明",
+   "element_id": "ascensionenlightenmenta",
+   "verb_id": "dream",
+   "verb_label": "入梦",
+   "slot": "dream",
+   "ok": false,
+   "error": "HTTP 404: {\r\n  \"message\": \"One or more errors occurred. (No token found at path \\\"~/tabletop!ascensionenlightenmenta_61\\\".)\"\r\n}",
+   "at": "2026-11-09 23:00:31"
+  }
+ ],
+ "failures": [
+  {
+   "signature": "start:study",
+   "error": "开始失败: HTTP 409: {\r\n  \"message\": \"One or more errors occurred. (Situation study could not begin it's recipe.)\"\r\n}（配方条件不满足；当前槽位：study=空。换一张卡或换槽位再试）",
+   "count": 3,
+   "at": "2026-11-09 22:43:55"
+  },
+  {
+   "signature": "move:reason->study:with",
+   "error": "HTTP 400: {\r\n  \"message\": \"One or more errors occurred. (Exception has been thrown by the target of an invocation.)\"\r\n}",
+   "count": 1,
+   "at": "2026-11-09 22:31:37"
+  },
+  {
+   "signature": "move:fragmentlantern->study:with",
+   "error": "卡片移动后从桌面消失，该槽位可能不接受这张卡",
+   "count": 1,
+   "at": "2026-11-09 22:32:30"
+  },
+  {
+   "signature": "move:passion->study:moreglimmering",
+   "error": "HTTP 400: {\r\n  \"message\": \"One or more errors occurred. (Exception has been thrown by the target of an invocation.)\"\r\n}",
+   "count": 1,
+   "at": "2026-11-09 22:33:05"
+  },
+  {
+   "signature": "start:work",
+   "error": "开始失败: HTTP 409: Conflict（配方条件不满足；当前槽位：work=空。换一张卡或换槽位再试）",
+   "count": 1,
+   "at": "2026-11-09 22:33:35"
+  },
+  {
+   "signature": "move:missing:灵感",
+   "error": "找不到卡片「灵感」。桌面/槽内的卡片有：一瞬追忆、关于潜在合作者的笔记、去往莫兰书店的路线、激情、理性、资金",
+   "count": 1,
+   "at": "2026-11-09 22:34:11"
+  },
+  {
+   "signature": "move:fleeting->dream:reflection",
+   "error": "HTTP 400: {\r\n  \"message\": \"One or more errors occurred. (Exception has been thrown by the target of an invocation.)\"\r\n}",
+   "count": 1,
+   "at": "2026-11-09 22:35:23"
+  },
+  {
+   "signature": "move:dread->dream:reflection",
+   "error": "HTTP 400: {\r\n  \"message\": \"One or more errors occurred. (Exception has been thrown by the target of an invocation.)\"\r\n}",
+   "count": 1,
+   "at": "2026-11-09 22:40:32"
+  },
+  {
+   "signature": "move:ascensionenlightenmenta->dream:lore",
+   "error": "HTTP 400: {\r\n  \"message\": \"One or more errors occurred. (Exception has been thrown by the target of an invocation.)\"\r\n}",
+   "count": 1,
+   "at": "2026-11-09 22:43:14"
+  },
+  {
+   "signature": "start:新游戏",
+   "error": "找不到动词「新游戏」。桌面上的动词有：无",
+   "count": 1,
+   "at": "2026-11-09 22:46:32"
+  },
+  {
+   "signature": "move:funds->time:expenses",
+   "error": "HTTP 400: {\r\n  \"message\": \"One or more errors occurred. (Exception has been thrown by the target of an invocation.)\"\r\n}",
+   "count": 1,
+   "at": "2026-11-09 22:52:48"
+  },
+  {
+   "signature": "move:health->work:work",
+   "error": "HTTP 404: {\r\n  \"message\": \"One or more errors occurred. (No token found at path \\\"~/tabletop!health_5\\\".)\"\r\n}",
+   "count": 1,
+   "at": "2026-11-09 22:56:57"
+  },
+  {
+   "signature": "move:ascensionenlightenmenta->dream:dream",
+   "error": "HTTP 404: {\r\n  \"message\": \"One or more errors occurred. (No token found at path \\\"~/tabletop!ascensionenlightenmenta_61\\\".)\"\r\n}",
+   "count": 1,
+   "at": "2026-11-09 23:00:31"
+  }
+ ],
+ "lessons": [
+  {
+   "topic": "网络攻略：密教模拟器 研究 无形之术 lore 增长 知识 study 槽位 with 需要什么卡",
+   "text": "- 研究槽里的 409 是「合成配方未凑齐」，不是程序出错：把 lore（守夜人的秘密）放进研究后动词会变成「增长关于无形之术的知识？」，这是同级知识合成配方，通常要**两张相同（同阶同属性）的 lore**才能进一阶，你手里只有一张，所以补其他卡也填不满条件（是否严格“两张相同”不确定，按牌桌提示为准）。\n- 上一步 move slot=\"with\" 返回 HTTP 400 是接口抛出异常（Exception），不是规则拒绝；先把守夜人的秘密从 study 取回，别在同一槽位反复硬试，改从 cs_status 读该动词真实槽位名再放（具体槽名不确定）。\n- 手头最稳的一步：灵感卡明写“在研究中使用‘灵感’可获得‘激情’”，把 **灵感** 放进 研究（study）结算，换回一张可用的激情——它三分钟后会自行蒸发的，别浪费。\n- 能力升级属另一套配方：理性＋博闻、健康＋活力、激情＋灵感（一般各需两张 ingredient 才升一阶，不确定是否两张），别和 lore 合成混为一谈。\n- 现金流别断：作业＋健康＝医院里的又一次轮班→产出资金；时间流逝每轮都在扣资金槽里的钱，先保证不断粮再谈",
+   "source": "web",
+   "confidence": 0.7,
+   "at": "2026-11-09 22:32:20"
+  },
+  {
+   "topic": "先读实时牌桌",
+   "text": "每次放卡前先用 cs_status 确认卡片是否真在桌面、动词真实槽位名和已填槽内容，别依赖上一轮缓存或旧局面。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:34:22"
+  },
+  {
+   "topic": "限时卡优先处理",
+   "text": "「灵感」这类会自行蒸发的限时卡要第一时间用掉；若移动失败先查是否已过期或被其他动词占用，不要连续重试同一目标。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:34:22"
+  },
+  {
+   "topic": "409 不等于可硬试",
+   "text": "HTTP 409 表示配方条件不满足（槽位空/卡不对/数量不够），应换卡、换槽或先补齐配方，而不是反复 start/move 同一位置。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:34:22"
+  },
+  {
+   "topic": "槽位名以当前动词为准",
+   "text": "「研究」等动词在不同配方下槽名会变（study、moreglimmering、with 等），必须按 cs_status 返回的当前槽位放卡，不能套用旧经验里的槽名。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:34:22"
+  },
+  {
+   "topic": "网络攻略：密教模拟器 入梦 思忖我对非此世知识的追求 reflection 槽位 放什么卡",
+   "text": "- 先执行 `cs_status` 读取实时牌桌，确认「思忖我对非此世知识的追求」当前真实槽位名与可放卡牌；不要按旧经验里的 `reflection` 直接硬放。\n- 资料全是汉字“密”的字典释义，与游戏问题无关，不能据此判断槽位配方；本次只能按牌桌返回结果试卡。\n- `reflection` 槽通常偏记忆/影响类卡；候选是「一瞬追忆」（带 memory/influence），但上次放入返回 HTTP 400 异常，先确认它是否仍在桌面、是否已过期，再重试。\n- 若「思忖」的 `reflection` 仍报 400，改试把「一瞬追忆」放入「入梦」动词的槽位（具体槽名不确定，可能是 `dream`），仍失败就停止，不要同槽反复 move。\n- 「活力」是限时卡，优先处理：它写明与另一张“活力”同用可升级技能；目前只有一张，单独放入作业/入梦是否有效不确定。\n- 不要往 `reflection` 放资金、理性、激情，除非实时牌桌明确提示；这些卡更可能对应作业、研究或升级配方。",
+   "source": "web",
+   "confidence": 0.7,
+   "at": "2026-11-09 22:35:54"
+  },
+  {
+   "topic": "检索精度",
+   "text": "查攻略时把游戏名、动词全名和卡名一起写进检索词，避免「密」这类单字歧义把结果带成汉语字典；查不到就改按棋桌反馈试，不要相信无关资料。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:36:04"
+  },
+  {
+   "topic": "400 不等于可重试",
+   "text": "同一张卡对同一动词槽位返回 HTTP 400 两次以上，就停止重试，先用 cs_status 读真实槽名与可放卡，再换动词或换卡。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:36:04"
+  },
+  {
+   "topic": "入梦槽位",
+   "text": "「入梦」的可用槽名已实证为 dream（诱惑：启明放入成功），记忆/影响类卡可先试这个槽，而不是只往思忖的 reflection 上撞。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:36:04"
+  },
+  {
+   "topic": "限时卡优先",
+   "text": "「活力」约三分钟就会蒸发，拿到后立刻安排使用（优先考虑与另一张活力同槽升级，单张是否有效尚不确定）。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:36:04"
+  },
+  {
+   "topic": "现金流",
+   "text": "时间流逝持续扣资金槽的钱，每几轮就用作业＋健康补一次资金，别等断粮再救。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:36:04"
+  },
+  {
+   "topic": "经验入库",
+   "text": "把「一瞬追忆 × 思忖 reflection 报 400」记为负面配方观察，下次先读 cs_status 再放卡，不再依赖旧局面缓存。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:36:04"
+  },
+  {
+   "topic": "作业槽",
+   "text": "不要把「衰老」这类残损卡放进作业的 work 槽——它会让正式工作退化成「沿街乞讨」；作业应优先用健康等正常能力卡，残损卡留作它用。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:41:04"
+  },
+  {
+   "topic": "入梦槽位",
+   "text": "「诱惑：启明」放 dream 已实证可行；reflection 对恐惧报 400，别在同一槽位硬试，改放记忆/影响类卡（如刚结算的「一瞬追忆」），或先按 cs_status 的实时槽名再动手。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:41:04"
+  },
+  {
+   "topic": "结算顺序",
+   "text": "出现 Complete 的待结算产出要优先 conclude（本轮「世界恢复如常」→「一瞬追忆」），再处理长时限动词，避免限时产出过期浪费。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:41:04"
+  },
+  {
+   "topic": "现金流",
+   "text": "时间流逝持续扣资金，桌面只剩 1 资金且作业已退化；下一步应先把衰老从 work 取回或换正常能力卡，尽快恢复稳定收入，别等断粮再救。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:41:04"
+  },
+  {
+   "topic": "网络攻略：密教模拟器 cs_status 未开局 桌面0张卡 无遗产 是否角色死亡 如何重新开始",
+   "text": "- 本次检索结果全是「密」字的字典释义，与游戏无关，直接作废，不要据此判断死亡或重开机制（不确定是否已死亡）。\n- 先读域内缓存：用 `cs_world` 查看最近局面与卡片/动词目录，确认「未开局 + 0 卡 0 动词」是死亡结算、会话重置还是等待开局（不确定具体是哪种）。\n- 再用 `cs_knowledge` 检索已有 16 条经验/12 条配方，看是否记录过「角色死亡」「重置」「新开局」的条目，按记录照做。\n- 若确认已死亡，可尝试按新开一局处理：看 `cs_world` 里是否列出开局动词（如「新游戏 / 开始 / 遗产选择」），有则 `cs_start` 该动词；没有就停下别乱放卡（不确定当前是否支持重开）。\n- 不要再往 `!study_13` 的 start、空参数 `wait`、`诱惑：启明→月照之途/lore` 这三组已失败组合上重试。\n- 若查不到任何重开路径，先把局面（0 卡、无遗产、未开局）如实记录为本次推演的终止状态，避免继续空转步数。",
+   "source": "web",
+   "confidence": 0.7,
+   "at": "2026-11-09 22:45:18"
+  },
+  {
+   "topic": "网络攻略：cs_world 缓存工具说明 密教模拟器 未开局状态下是否有开局动词可以 start 新游戏",
+   "text": "{\"reasoning\":\"检索两次都撞上无关网页（字典 / CS:GO），停止 research；改按缓存攻略建议，直接尝试开局动词「新游戏」，用棋桌反馈验证是否存在该开局入口。\",\"action\":\"start\",\"args\":{\"verb\":\"新游戏\"}}",
+   "source": "web",
+   "confidence": 0.7,
+   "at": "2026-11-09 22:46:16"
+  },
+  {
+   "topic": "正职链路",
+   "text": "这样做有效：conclude 高层工作 → 把「坐上……高层职位」放进作业 work 槽 → start 作业 → 用「理性」等正常能力卡填 diligence 槽，这条链能稳定把职位转成带槽工作动词，优先复用。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:46:55"
+  },
+  {
+   "topic": "槽位选卡",
+   "text": "工作动词的 diligence 槽用理性/健康这类正常能力卡，别再往任何工作槽塞「衰老」等残损卡，会把正式工作降级成乞讨。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:46:55"
+  },
+  {
+   "topic": "study 动词",
+   "text": "别再对 !study_13 直接 start；409「配方条件不满足」说明缺前置卡或槽位，先按 cs_status 拿到 study 的实时槽名与需求再放卡。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:46:55"
+  },
+  {
+   "topic": "wait 用法",
+   "text": "别再重试已被判失败的 wait（空参数和 20s 超时都失败过）；等待不会催生新动词，局面为空时 wait 没有意义。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:46:55"
+  },
+  {
+   "topic": "检索精度",
+   "text": "检索时避免单字「密」和缩写「CS」，把「密教模拟器 / Cultist Simulator」全名与 Moon 等具体卡名一起写；两次都被字典释义和 CS:GO 官网污染，等于白查。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:46:55"
+  },
+  {
+   "topic": "空桌判定",
+   "text": "桌面 0 卡 0 动词且「新游戏」找不到动词时，不要反复 status/start 空转；立即记录为终止状态并转去可用域核实是否能重置对局。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 22:46:55"
+  },
+  {
+   "topic": "启动游戏",
+   "text": "用 steam 启动《密教模拟器》，约 5s 后 CSRest 接口（127.0.0.1:8765）就绪。",
+   "source": "bootstrap",
+   "confidence": 0.9,
+   "at": "2026-11-09 22:51:42"
+  },
+  {
+   "topic": "结算限时动词有效",
+   "text": "这样做有效：对状态 Complete 的动词（入梦、幻象、渴求等）立刻 conclude，能稳定产出「诱惑：启明」「一瞬追忆」「躁动」等限时卡；不要放着不结算，产出会随动词过期一起蒸发。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 23:04:40"
+  },
+  {
+   "topic": "病痛必须优先处理",
+   "text": "别再让「病痛/生病」拖着不管：它会转成「健康已耗尽」并在 starvation 槽开倒计时，是直接死因；出现病痛第一优先级是放进入梦 dream 槽（卡面明写入梦可恢复健康）或换钱休息，别先去推主线。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 23:04:40"
+  },
+  {
+   "topic": "资金槽不能长期空转",
+   "text": "别再让「时间流逝」的 expenses 槽空着：每轮都在扣钱，空槽等于慢性死亡；现金流断了就先跑「作业＋理性」拿资金，再谈升格。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 23:04:40"
+  },
+  {
+   "topic": "入梦槽位实操",
+   "text": "「入梦」的可用槽名是 dream，但往 dream 塞「诱惑：启明」曾返回 404（No token found），不要在同一组卡槽上反复硬试；失败一次就改放记忆/影响类卡（一瞬追忆）或先读 cs_status 拿实时槽名。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 23:04:40"
+  },
+  {
+   "topic": "步数预算",
+   "text": "别把主线推进压到最后几步：本轮在倒计时末端才去碰升格，前面大量步数花在试探槽位上；开局就该并行推进「资金循环 + 病痛处理 + 诱惑升级」，留足余量。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 23:04:40"
+  },
+  {
+   "topic": "空局面排查",
+   "text": "桌面与动词全部清空时先 status/cs_status 确认是死亡结算还是会话重置，再决定是否重开；不要直接空转 wait（空参数与长超时都已失败过）。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 23:04:40"
+  },
+  {
+   "topic": "限时卡优先级",
+   "text": "灵感、活力、一瞬追忆、躁动这类卡几分钟内自行蒸发，出现即用：要么进研究换激情，要么进 dream 槽消耗，不要攒在桌面上等过期。",
+   "source": "reflection",
+   "confidence": 0.65,
+   "at": "2026-11-09 23:04:40"
+  }
+ ]
+}

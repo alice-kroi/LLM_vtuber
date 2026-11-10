@@ -1,0 +1,7 @@
+{
+  "id": "memory",
+  "label": "记忆内核",
+  "version": "1.0.0",
+  "risk": "R1",
+  "builtin": true
+}

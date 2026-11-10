@@ -1,0 +1,17 @@
+{
+  "id": "hf_hub",
+  "label": "HuggingFace 模型检索",
+  "version": 1,
+  "risk": "R2",
+  "source": "manual_test",
+  "description": "只读检索 HuggingFace 模型库，默认走 hf-mirror.com",
+  "smoke": {
+    "hf_search_models": {
+      "query": "bert",
+      "limit": 2
+    },
+    "hf_model_info": {
+      "model_id": "bert-base-chinese"
+    }
+  }
+}

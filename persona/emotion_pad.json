@@ -1,0 +1,302 @@
+{
+  "_schema": "will_engine emotion -> PAD impulse table (v3)",
+  "_revision": 3,
+  "_revision_note": "取得 R&M 1977 原表（Table 4 完整 22 行）后重定主表：primary_lineage 改为 russell_mehrabian_1977_table4。同时修正 v2 的两个误判：disappointment 降级（原表无此词条）、sadness 升级（改用 R&M 的 sad，而非 CSDN 表借用的 pain）。",
+  "_created": "2026-10-19",
+  "_purpose": "意志脑情绪层的 PAD 冲动数值来源。设计见 docs/WILL_ENGINE_SOUL_ARCHITECTURE.md §3.4.3。",
+  "_usage": "代码仅使用 status 为 verified_primary / verified_secondary 的条目。derived 与 predicted_paper 仅在 allow_derived=true 时生效。conflict / todo 一律跳过并记 warning。禁止跨表混用同一情绪的值。",
+
+  "primary_lineage": "russell_mehrabian_1977_table4",
+  "allow_derived": false,
+
+  "_sources": [
+    {
+      "id": "russell-mehrabian-1977-table4",
+      "citation": "Guo & Choi (2021), arXiv:2104.10117, 附录 A.3 Table 4 ——『The original PAD values of 22 emotions provided by Russell and Mehrabian (1977)』",
+      "local_copy": "docs/2104.10117v1.pdf",
+      "verified_how": "本轮已取得本地 PDF 原文并逐行提取，内容完整",
+      "root_citation": "Russell, J. A., & Mehrabian, A. (1977). Evidence for a three-factor theory of emotions. Journal of Research in Personality, 11(3), 273-294. DOI 10.1016/0092-6566(77)90037-X",
+      "note": "虽为复述，但属作者声明『manually assessed by Russell and Mehrabian (1977)』的照抄，且多条目已被第三方独立复现（见 _cross_checks）"
+    },
+    {
+      "id": "arxiv-2104.10117-table5",
+      "citation": "同上论文附录 Table 5 ——『The PAD values of 32 emotions predicted by our regression models』",
+      "note": "**是该论文的回归预测值，不是 R&M 原始数据**；bold 标记的 10 个为原表缺失、由该论文补出的条目。仅作为非实证条目的参照"
+    },
+    {
+      "id": "arxiv-2401.14436",
+      "citation": "Trust model of privacy-concerned, emotionally-aware agents in a cooperative logistics problem. arXiv:2401.14436",
+      "note": "独立复现 joy / sad / surprise 三项"
+    },
+    {
+      "id": "csdn-companion-survey",
+      "citation": "AI Companion 情感层技术调研报告 §2.5 PAD 情绪坐标表（自述整合 Mehrabian 1996 + OPO-FCM 2023 + WASABI 2008）"
+    },
+    {
+      "id": "csroc-joc2901-09",
+      "citation": "Chen & Cui. Describing the Emotional Model of PAD Based on Consistent Covering Granule. Journal of Computers 29(1), JOC2901-09"
+    },
+    {
+      "id": "arxiv-2404.07229",
+      "citation": "Personality-affected Emotion Generation in Dialog Systems. arXiv:2404.07229"
+    },
+    {
+      "id": "arxiv-2507.22326",
+      "citation": "An Explainable Emotion Alignment Framework for LLM-Empowered Agent in Metaverse Service Ecosystem. arXiv:2507.22326"
+    },
+    {
+      "id": "plos-one-0191064",
+      "citation": "PLOS One, 10.1371/journal.pone.0191064"
+    }
+  ],
+
+  "_lineage_resolution": {
+    "conclusion": "以 R&M 1977 原表（Table 4）为唯一主表。此前所谓『两支表冲突』的真正原因已查明：**不是数值冲突，而是下游论文把 R&M 的 `terrified` 改名成了 `Fear`**。",
+    "fear_conflict_truth": "R&M 原表同时含 `afraid`(-0.64, 0.60, -0.43) 与 `terrified`(-0.62, 0.82, -0.43)。arXiv:2404.07229 与 arXiv:2507.22326 的『Fear』取的是 `terrified` 的值，而 CSDN 整合表 / csroc 表取的是 `afraid` 的值。两者都源自 R&M，只是词条不同 —— 故本项目取 `afraid`（语义更贴『恐惧』且被两个第三方来源复现），`terrified` 记入参考区备用。",
+    "csdn_table_is_not_faithful": "CSDN 整合表**并非 R&M 原表的忠实复述**：只有 Joy / Anger / Fear / Disgust 四条与 R&M 一致；其 Sadness(-0.40, -0.20, -0.50) 实为 csroc 表的 `pain`，与 R&M 的 `sad`(-0.64, -0.27, -0.33) 不同。故 v2 里把它当主表的做法已在 v3 更正。"
+  },
+
+  "_cross_checks": {
+    "joyful": "R&M -0.64... 见下：R&M joyful(0.76, 0.48, 0.35) = CSDN Joy(0.76, 0.48, 0.35) = arXiv:2401.14436 joy(0.75, 0.48, 0.35，A/D 逐位相同，P 差 0.01) → 三源一致",
+    "afraid": "R&M afraid(-0.64, 0.60, -0.43) = csroc afraid(-0.64, 0.6, -0.43) = CSDN Fear(-0.64, 0.60, -0.43) → 三源一致",
+    "angry": "R&M angry(-0.51, 0.59, 0.25) = CSDN Anger = arXiv:2404.07229 Anger = arXiv:2507.22326 Anger → 四源一致",
+    "disgusted": "R&M disgusted(-0.60, 0.35, 0.11) = CSDN Disgust = arXiv:2404.07229 Disgust = arXiv:2507.22326 Disgust → 四源一致",
+    "terrified": "R&M terrified(-0.62, 0.82, -0.43) = arXiv:2404.07229 / arXiv:2507.22326 的『Fear』→ 三源一致（但命名被下游改动）"
+  },
+
+  "_name_mapping": {
+    "_note": "R&M 原表用小写形容词；本项目用 OCC 风格名词。以下为显式映射，非自动改名。",
+    "joy": "R&M joyful",
+    "gratitude": "R&M grateful",
+    "satisfaction": "R&M content（语义：满足/惬意）",
+    "pride": "R&M proud",
+    "hope": "R&M hopeful",
+    "fear": "R&M afraid（非 terrified，理由见 _lineage_resolution）",
+    "anger": "R&M angry",
+    "shame": "R&M ashamed",
+    "sadness": "R&M sad"
+  },
+
+  "_known_issues": [
+    "devastated 异常：Table 4 印为 (0.14, 0.45, -0.24)，但与其自身 Table 5 的预测值 (-0.41, 0.10, -0.40) 及常识（极度悲伤不应为正向愉悦度）都不符，疑为原表印刷错误。本项目 14 情绪未用到该词条，仅在参考区标注。",
+    "R&M 原表 22 条中**没有** relief / interest(s) / boredom / disappointment / distress 这几个词条 —— 故它们的值只能来自派生或论文预测表，不可标为实证。",
+    "csroc 表的 `pain`(-0.40, -0.20, -0.50) 与 `disappoint`(-0.30, 0.10, -0.40) 均不在 R&M 22 条内，属该文自己的 24 情绪表，不可与 R&M 混用。",
+    "PLOS One 0191064 的 `Hate`(-0.60, 0.60, 0.30) 不在 R&M 22 条内，来源不明。",
+    "v2 的两处误判已更正：disappointment 由 verified_secondary 降为 predicted_paper（原表无对应词条）；sadness 由 verified_secondary 升为 verified_primary（改用 R&M 的 sad）。"
+  ],
+
+  "_coverage": {
+    "total_project_emotions": 14,
+    "verified_primary": 9,
+    "verified_secondary": 0,
+    "derived": 4,
+    "predicted_paper": 1,
+    "todo_or_conflict": 0,
+    "detail": {
+      "verified_primary": ["joy", "gratitude", "satisfaction", "pride", "hope", "fear", "anger", "shame", "sadness"],
+      "derived": ["relief", "interest", "distress", "boredom"],
+      "predicted_paper": ["disappointment"]
+    },
+    "note": "9 个实证条目可立即启用（占 64%）；余 5 个（relief/interest/distress/boredom/disappointment）需 allow_derived=true。"
+  },
+
+  "_fallback_policy": {
+    "_enabled": false,
+    "_rationale": "R&M 原表没有这 5 个词条，但它们都是高频触发项（relief←任务化险为夷、interest←弹幕话题、distress←任务失败、boredom←久无互动、disappointment←期待落空）。以下规则均以 R&M 已实证条目为锚点、按 OCC 的归因分类与 ALMA 八象限推导，逐条写明 basis 与 rule；predicted_paper 类另取该论文自身回归预测表中的正式条目。默认关闭。",
+    "anchors": "joy(0.76,0.48,0.35) / sad(-0.64,-0.27,-0.33) / impressed(0.41,0.30,-0.32) / surprised(0.40,0.67,-0.13)",
+    "rules": [
+      { "emotion": "relief", "status": "derived", "basis": "OCC：joy 类，紧张解除后唤醒转低", "formula": "joyful * (0.7, -, 0.9)；A = -0.20", "computed": { "P": 0.53, "A": -0.20, "D": 0.32 } },
+      { "emotion": "interest", "status": "derived", "basis": "OCC：对象吸引类（正向但唤醒中等、主导略低），形态参考 impressed / surprised", "formula": "OCC 对象类取值", "computed": { "P": 0.35, "A": 0.45, "D": -0.10 } },
+      { "emotion": "distress", "status": "derived", "basis": "OCC：『对事件不满』，与 sadness 同类", "formula": "= sad", "computed": { "P": -0.64, "A": -0.27, "D": -0.33 } },
+      { "emotion": "boredom", "status": "derived", "basis": "ALMA 的 bored 八象限（-P -A -D），取该象限中心", "formula": "八象限中心取值", "computed": { "P": -0.45, "A": -0.35, "D": -0.20 } },
+      { "emotion": "disappointment", "status": "predicted_paper", "basis": "OCC：失望 = sadness + surprise 的复合；R&M 原表无对应词条", "formula": "取自论文 Table 5 的正式预测条目 `disappointed`", "computed": { "P": -0.40, "A": 0.27, "D": -0.24 } }
+    ]
+  },
+
+  "emotions": {
+    "joy": {
+      "P": 0.76, "A": 0.48, "D": 0.35,
+      "status": "verified_primary",
+      "source": "russell-mehrabian-1977-table4",
+      "source_entry": "joyful",
+      "cross_checked_by": ["csdn-companion-survey", "arxiv-2401.14436"]
+    },
+    "gratitude": {
+      "P": 0.64, "A": 0.16, "D": -0.21,
+      "status": "verified_primary",
+      "source": "russell-mehrabian-1977-table4",
+      "source_entry": "grateful"
+    },
+    "satisfaction": {
+      "P": 0.86, "A": 0.20, "D": 0.62,
+      "status": "verified_primary",
+      "source": "russell-mehrabian-1977-table4",
+      "source_entry": "content",
+      "note": "映射理由：content 的『满足/惬意』语义对应 satisfaction"
+    },
+    "relief": {
+      "P": 0.53, "A": -0.20, "D": 0.32,
+      "status": "derived",
+      "rule": "joyful * (0.7, -, 0.9)；A = -0.20",
+      "basis": "OCC：joy 类，紧张解除后唤醒转低",
+      "note": "R&M 原表无 relief 词条；需 allow_derived=true 才生效"
+    },
+    "pride": {
+      "P": 0.77, "A": 0.38, "D": 0.65,
+      "status": "verified_primary",
+      "source": "russell-mehrabian-1977-table4",
+      "source_entry": "proud"
+    },
+    "hope": {
+      "P": 0.51, "A": 0.23, "D": 0.14,
+      "status": "verified_primary",
+      "source": "russell-mehrabian-1977-table4",
+      "source_entry": "hopeful"
+    },
+    "interest": {
+      "P": 0.35, "A": 0.45, "D": -0.10,
+      "status": "derived",
+      "rule": "OCC 对象吸引类取值（形态参考 impressed / surprised）",
+      "basis": "OCC：对象吸引类",
+      "note": "R&M 原表无 interest(ed) 词条；需 allow_derived=true 才生效"
+    },
+    "distress": {
+      "P": -0.64, "A": -0.27, "D": -0.33,
+      "status": "derived",
+      "rule": "= sad",
+      "basis": "OCC：『对事件不满』与 sadness 同类",
+      "note": "需 allow_derived=true 才生效"
+    },
+    "disappointment": {
+      "P": -0.40, "A": 0.27, "D": -0.24,
+      "status": "predicted_paper",
+      "source": "arxiv-2104.10117-table5",
+      "source_entry": "disappointed",
+      "basis": "OCC：失望 = sadness + surprise 的复合；R&M 原表无对应词条",
+      "note": "取自论文自身回归预测表的正式条目（非 R&M 原始数据）；需 allow_derived=true 才生效。v2 曾误标为 verified_secondary，v3 更正"
+    },
+    "fear": {
+      "P": -0.64, "A": 0.60, "D": -0.43,
+      "status": "verified_primary",
+      "source": "russell-mehrabian-1977-table4",
+      "source_entry": "afraid",
+      "cross_checked_by": ["csroc-joc2901-09", "csdn-companion-survey"],
+      "alternate": {
+        "note": "R&M 原表另有 terrified(-0.62, 0.82, -0.43)；arXiv:2404.07229 与 arXiv:2507.22326 的『Fear』即此值",
+        "P": -0.62, "A": 0.82, "D": -0.43
+      }
+    },
+    "anger": {
+      "P": -0.51, "A": 0.59, "D": 0.25,
+      "status": "verified_primary",
+      "source": "russell-mehrabian-1977-table4",
+      "source_entry": "angry",
+      "cross_checked_by": ["csdn-companion-survey", "arxiv-2404.07229", "arxiv-2507.22326"]
+    },
+    "shame": {
+      "P": -0.57, "A": 0.01, "D": -0.34,
+      "status": "verified_primary",
+      "source": "russell-mehrabian-1977-table4",
+      "source_entry": "ashamed"
+    },
+    "boredom": {
+      "P": -0.45, "A": -0.35, "D": -0.20,
+      "status": "derived",
+      "rule": "ALMA bored 八象限中心",
+      "basis": "ALMA 八象限（-P -A -D）",
+      "note": "R&M 原表无 bored 词条；需 allow_derived=true 才生效"
+    },
+    "sadness": {
+      "P": -0.64, "A": -0.27, "D": -0.33,
+      "status": "verified_primary",
+      "source": "russell-mehrabian-1977-table4",
+      "source_entry": "sad",
+      "note": "v2 曾因 CSDN 表借用 csroc 的 pain 值(-0.40,-0.20,-0.50) 而误判；v3 已改用 R&M 原值"
+    }
+  },
+
+  "_verified_reference_rows": {
+    "_note": "原始核验记录（本轮由 docs/2104.10117v1.pdf 逐行提取），供复核与补全使用；不直接参与运行时取值",
+    "table4_russell_mehrabian_1977_original_22": {
+      "afraid": { "P": -0.64, "A": 0.60, "D": -0.43 },
+      "angry": { "P": -0.51, "A": 0.59, "D": 0.25 },
+      "annoyed": { "P": -0.28, "A": 0.17, "D": 0.04 },
+      "anxious": { "P": 0.01, "A": 0.59, "D": -0.15 },
+      "ashamed": { "P": -0.57, "A": 0.01, "D": -0.34 },
+      "caring": { "P": 0.64, "A": 0.35, "D": 0.24 },
+      "content": { "P": 0.86, "A": 0.20, "D": 0.62 },
+      "devastated": { "P": 0.14, "A": 0.45, "D": -0.24, "anomaly": "疑为原表印刷错误，见 _known_issues" },
+      "disgusted": { "P": -0.60, "A": 0.35, "D": 0.11 },
+      "embarrassed": { "P": -0.46, "A": 0.54, "D": -0.24 },
+      "excited": { "P": 0.62, "A": 0.75, "D": 0.38 },
+      "furious": { "P": -0.44, "A": 0.72, "D": 0.32 },
+      "grateful": { "P": 0.64, "A": 0.16, "D": -0.21 },
+      "guilty": { "P": -0.57, "A": 0.28, "D": -0.34 },
+      "hopeful": { "P": 0.51, "A": 0.23, "D": 0.14 },
+      "impressed": { "P": 0.41, "A": 0.30, "D": -0.32 },
+      "joyful": { "P": 0.76, "A": 0.48, "D": 0.35 },
+      "lonely": { "P": -0.66, "A": -0.43, "D": -0.32 },
+      "proud": { "P": 0.77, "A": 0.38, "D": 0.65 },
+      "sad": { "P": -0.64, "A": -0.27, "D": -0.33 },
+      "surprised": { "P": 0.40, "A": 0.67, "D": -0.13 },
+      "terrified": { "P": -0.62, "A": 0.82, "D": -0.43 }
+    },
+    "table5_paper_regression_predicted_32": {
+      "_note": "该论文回归预测值，非 R&M 原始数据。bold 标记的 10 项为原表缺失、由该论文补出",
+      "afraid": { "P": -0.56, "A": 0.70, "D": -0.60 },
+      "angry": { "P": -0.61, "A": 0.60, "D": 0.28 },
+      "annoyed": { "P": -0.56, "A": 0.47, "D": 0.09 },
+      "anticipating": { "P": 0.53, "A": 0.59, "D": 0.03, "newly_added": true },
+      "anxious": { "P": -0.05, "A": 0.61, "D": -0.31 },
+      "apprehensive": { "P": -0.25, "A": 0.49, "D": -0.46, "newly_added": true },
+      "ashamed": { "P": -0.60, "A": 0.35, "D": -0.33 },
+      "caring": { "P": 0.46, "A": 0.27, "D": 0.22 },
+      "confident": { "P": 0.55, "A": 0.08, "D": 0.51, "newly_added": true },
+      "content": { "P": 0.86, "A": 0.28, "D": 0.44 },
+      "devastated": { "P": -0.41, "A": 0.10, "D": -0.40 },
+      "disappointed": { "P": -0.40, "A": 0.27, "D": -0.24, "newly_added": true },
+      "disgusted": { "P": -0.61, "A": 0.62, "D": 0.12 },
+      "embarrassed": { "P": -0.62, "A": 0.31, "D": -0.46 },
+      "excited": { "P": 0.67, "A": 0.64, "D": 0.45 },
+      "faithful": { "P": 0.20, "A": 0.10, "D": 0.18, "newly_added": true },
+      "furious": { "P": -0.63, "A": 0.70, "D": 0.31 },
+      "grateful": { "P": 0.80, "A": 0.30, "D": -0.14 },
+      "guilty": { "P": -0.55, "A": 0.22, "D": -0.52 },
+      "hopeful": { "P": 0.55, "A": 0.29, "D": 0.19 },
+      "impressed": { "P": 0.47, "A": 0.51, "D": -0.06 },
+      "jealous": { "P": -0.15, "A": -0.27, "D": -0.08, "newly_added": true },
+      "joyful": { "P": 0.81, "A": 0.57, "D": 0.37 },
+      "lonely": { "P": -0.33, "A": -0.46, "D": -0.51 },
+      "nostalgic": { "P": 0.16, "A": -0.20, "D": 0.14, "newly_added": true },
+      "prepared": { "P": 0.32, "A": 0.22, "D": 0.17, "newly_added": true },
+      "proud": { "P": 0.78, "A": 0.47, "D": 0.46 },
+      "sad": { "P": -0.44, "A": -0.12, "D": -0.43 },
+      "sentimental": { "P": 0.09, "A": -0.13, "D": -0.11, "newly_added": true },
+      "surprised": { "P": 0.58, "A": 0.79, "D": -0.19 },
+      "terrified": { "P": -0.65, "A": 0.76, "D": -0.60 },
+      "trusting": { "P": 0.07, "A": 0.15, "D": 0.23, "newly_added": true }
+    },
+    "other_tables_not_mixed_in": {
+      "_note": "以下条目不属于 R&M 原表，登记以避免重复排查",
+      "csdn_integrated": {
+        "Joy": { "P": 0.76, "A": 0.48, "D": 0.35, "same_as_rm": true },
+        "Sadness": { "P": -0.40, "A": -0.20, "D": -0.50, "same_as_rm": false, "equals": "csroc 的 pain" },
+        "Anger": { "P": -0.51, "A": 0.59, "D": 0.25, "same_as_rm": true },
+        "Fear": { "P": -0.64, "A": 0.60, "D": -0.43, "same_as_rm": true, "equals": "R&M 的 afraid" },
+        "Surprise": { "P": 0.20, "A": 0.45, "D": -0.45, "same_as_rm": false },
+        "Disgust": { "P": -0.60, "A": 0.35, "D": 0.11, "same_as_rm": true },
+        "Trust": { "P": 0.60, "A": 0.30, "D": 0.40, "same_as_rm": false }
+      },
+      "csroc_24": {
+        "pain": { "P": -0.40, "A": -0.20, "D": -0.50 },
+        "disappoint": { "P": -0.30, "A": 0.10, "D": -0.40 }
+      },
+      "arxiv_2404_07229_and_2507_22326": {
+        "Fear": { "P": -0.62, "A": 0.82, "D": -0.43, "equals": "R&M 的 terrified" }
+      },
+      "plos_one": {
+        "Hate": { "P": -0.60, "A": 0.60, "D": 0.30 }
+      }
+    }
+  }
+}

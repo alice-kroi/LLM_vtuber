@@ -341,7 +341,7 @@ def ocr_screen(window_title: str = "") -> dict:
             it["y2"] += oy
         return {"success": True, "window": window_title or "全屏", "count": len(items),
                 "items": items[:60],
-                "note": "坐标已换算为屏幕绝对坐标，可直接 cu_click_xy"}
+                "note": "坐标已换算为屏幕绝对坐标，可直接 os_click_xy"}
     except Exception as e:
         return {"success": False, "error": f"OCR 失败: {e}"}
 

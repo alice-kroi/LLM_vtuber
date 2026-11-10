@@ -4,26 +4,30 @@ from langchain_core.embeddings import Embeddings
 import logging
 import uuid
 import time
-import numpy as np
 import os
 import threading
 import weakref
+from collections import OrderedDict
 from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
 class DoubaoEmbeddings(Embeddings):
-    def __init__(self, api_key=None, model="doubao-embedding-text-240715"):
-        # 如果没有提供api_key，可以使用环境变量或默认值
-        self.client = OpenAI(
+    def __init__(self, api_key=None, model="doubao-embedding-text-240715",
+                 client=None):
+        # 如果没有提供 api_key，使用环境变量；测试可注入 client
+        self.client = client or OpenAI(
             base_url=os.getenv("Doubao_API_URL", "https://ark.cn-beijing.volces.com/api/v3"),
-            api_key=api_key or os.getenv("Doubao_API_KEY")  # 可以替换为环境变量
+            api_key=api_key or os.getenv("Doubao_API_KEY")
         )
         self.model = model
         self.vector_dim = 2560  # 明确向量维度
-    
+        self._query_cache: "OrderedDict[str, List[float]]" = OrderedDict()
+        self._cache_lock = threading.Lock()
+        self._cache_max = 256
+
     def embed_documents(self, texts):
-        """为文档列表生成嵌入向量"""
+        """为文档列表生成嵌入向量；失败必须抛出，禁止写入随机向量。"""
         try:
             response = self.client.embeddings.create(
                 model=self.model,
@@ -33,22 +37,34 @@ class DoubaoEmbeddings(Embeddings):
             return [item.embedding for item in response.data]
         except Exception as e:
             logger.error(f"豆包生成文档嵌入失败: {str(e)}")
-            # 如果API调用失败，返回随机向量作为备选
-            return [np.random.random(self.vector_dim).tolist() for _ in texts]
-    
+            raise RuntimeError(f"embed_documents failed: {e}") from e
+
     def embed_query(self, text):
-        """为单个查询生成嵌入向量"""
+        """为单个查询生成嵌入向量；带 LRU 缓存，失败抛出。"""
+        key = str(text or "")
+        with self._cache_lock:
+            cached = self._query_cache.get(key)
+            if cached is not None:
+                self._query_cache.move_to_end(key)
+                return list(cached)
+
         try:
             response = self.client.embeddings.create(
                 model=self.model,
                 input=[text],
                 dimensions=self.vector_dim
             )
-            return response.data[0].embedding
+            vector = response.data[0].embedding
         except Exception as e:
             logger.error(f"豆包生成查询嵌入失败: {str(e)}")
-            # 如果API调用失败，返回随机向量作为备选
-            return np.random.random(self.vector_dim).tolist()
+            raise RuntimeError(f"embed_query failed: {e}") from e
+
+        with self._cache_lock:
+            self._query_cache[key] = list(vector)
+            self._query_cache.move_to_end(key)
+            while len(self._query_cache) > self._cache_max:
+                self._query_cache.popitem(last=False)
+        return vector
         
 class MilvusConnectionManager:
     _instances: Dict[str, 'MilvusConnectionManager'] = {}
@@ -95,6 +111,8 @@ class MilvusConnectionManager:
         self._operation_count = 0
         self._is_initializing = False
         self._initialized = True
+        self._last_health_at = 0.0
+        self._health_ttl = 30.0
 
         self._connection_status = "disconnected"
         self._error_message = ""
@@ -172,16 +190,21 @@ class MilvusConnectionManager:
             if self._client is None:
                 self._client = self._create_client()
                 self._connection_count += 1
+                self._last_health_at = time.time()
                 logger.info(f"[连接复用] 创建新连接: {self.uri}, db={self.db_name}, 连接计数={self._connection_count}")
                 return self._client
 
-            if not self._check_connection():
-                if self._reconnect():
-                    self._connection_count += 1
-                    logger.info(f"[连接复用] 重新连接成功: {self.uri}, db={self.db_name}, 连接计数={self._connection_count}")
-                    return self._client
-                else:
-                    raise Exception(f"Milvus连接失败: {self._error_message}")
+            now = time.time()
+            if now - self._last_health_at >= self._health_ttl:
+                self._last_health_at = now
+                if not self._check_connection():
+                    if self._reconnect():
+                        self._connection_count += 1
+                        self._last_health_at = time.time()
+                        logger.info(f"[连接复用] 重新连接成功: {self.uri}, db={self.db_name}, 连接计数={self._connection_count}")
+                        return self._client
+                    else:
+                        raise Exception(f"Milvus连接失败: {self._error_message}")
 
             logger.debug(f"[连接复用] 使用已有连接: {self.uri}, db={self.db_name}, 连接计数={self._connection_count}")
             return self._client
@@ -378,10 +401,10 @@ def create_collection(client: MilvusClient, collection_name: str, db_name: str) 
         # 切换到指定数据库（如果需要）
         # 注意：MilvusClient在初始化时已经指定了db_name，通常不需要再次切换
         
-        # 删除已存在的集合
+        # 已存在则直接复用，禁止在检索/启动路径上删除集合
         if client.has_collection(collection_name):
-            client.drop_collection(collection_name)
-            print(f"已删除现有集合: {collection_name}")
+            logger.info(f"集合已存在，复用: {collection_name}")
+            return True
         
         # 创建schema
         schema = client.create_schema(
@@ -445,9 +468,10 @@ def create_collection(client: MilvusClient, collection_name: str, db_name: str) 
         # 创建索引
         index_params = client.prepare_index_params()
         index_params.add_index(
-            field_name="vector_field",
-            index_type="AUTOINDEX",  # 使用自动索引
-            index_name="vector_index"
+            field_name="content_vector",
+            index_type="AUTOINDEX",
+            index_name="vector_index",
+            metric_type="COSINE"
         )
         
         client.create_index(

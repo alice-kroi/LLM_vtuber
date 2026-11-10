@@ -1,0 +1,10 @@
+{
+  "id": "sing",
+  "label": "AI 唱歌",
+  "version": "1.0.0",
+  "risk": "R3",
+  "builtin": true,
+  "smoke": {
+    "sing_health": {}
+  }
+}

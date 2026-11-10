@@ -1,0 +1,7 @@
+{
+  "id": "mcp_bridge",
+  "label": "MCP 桥接",
+  "version": "1.0.0",
+  "risk": "R2",
+  "builtin": true
+}

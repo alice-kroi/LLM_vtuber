@@ -1,0 +1,13 @@
+{
+  "id": "eval_lab",
+  "label": "评测台",
+  "version": 1,
+  "risk": "R1",
+  "source": "port:dsh-eval",
+  "description": "基准文件驱动：逐用例跑检查命令 → 指标汇总 → JSON/Markdown 报告 → 历史落库 + 配对 A/B 与符号检验",
+  "smoke": {
+    "eval_history": {
+      "limit": 3
+    }
+  }
+}

@@ -1,0 +1,334 @@
+{
+  "version": 1,
+  "capabilities": {
+    "hf_hub": {
+      "id": "hf_hub",
+      "label": "HuggingFace 模型检索",
+      "risk": "R2",
+      "status": "active",
+      "source": "user_confirmed",
+      "session_id": null,
+      "tools": [
+        "hf_search_models",
+        "hf_model_info"
+      ],
+      "created_at": "2026-10-20 23:17:34",
+      "admitted_at": "2026-10-20 23:43:24",
+      "suspended_at": null,
+      "reason": "",
+      "created_new": false,
+      "snapshot": "E:\\GitHub\\LLM_vtuber\\persona\\capability_snapshots\\hf_hub\\20261020-234324",
+      "quarantine_path": "",
+      "budget_calls": 500,
+      "stats": {
+        "calls": 0,
+        "success": 0,
+        "failures": 0,
+        "consecutive_failures": 0,
+        "avg_ms": 0,
+        "last_ms": 0,
+        "last_used": null
+      },
+      "gates": {
+        "g1_static": {
+          "passed": true
+        },
+        "g2_smoke": {
+          "passed": true
+        },
+        "g3_tools": {
+          "passed": true,
+          "executed": [
+            {
+              "tool": "hf_search_models",
+              "ok": true,
+              "returned_success": true
+            },
+            {
+              "tool": "hf_model_info",
+              "ok": true,
+              "returned_success": true
+            }
+          ],
+          "skipped": []
+        }
+      },
+      "stage": "derived"
+    },
+    "time_info": {
+      "id": "time_info",
+      "label": "时间信息",
+      "dir": "E:\\GitHub\\LLM_vtuber\\LLM_v2\\domains\\time_info",
+      "risk": "R0",
+      "status": "active",
+      "source": "coding_loop",
+      "session_id": 8,
+      "tools": [
+        "get_current_time"
+      ],
+      "created_at": "2026-10-21 00:08:12",
+      "admitted_at": "2026-10-21 00:13:04",
+      "suspended_at": null,
+      "reason": "",
+      "created_new": false,
+      "snapshot": "E:\\GitHub\\LLM_vtuber\\persona\\capability_snapshots\\time_info\\20261021-001304",
+      "quarantine_path": "",
+      "budget_calls": 500,
+      "stats": {
+        "calls": 0,
+        "success": 0,
+        "failures": 0,
+        "consecutive_failures": 0,
+        "avg_ms": 0,
+        "last_ms": 0,
+        "last_used": null
+      },
+      "gates": {
+        "g1_static": {
+          "passed": true
+        },
+        "g2_smoke": {
+          "passed": true
+        },
+        "g3_tools": {
+          "passed": true,
+          "executed": [
+            {
+              "tool": "get_current_time",
+              "ok": true,
+              "returned_success": true
+            }
+          ],
+          "skipped": []
+        }
+      },
+      "stage": "derived"
+    },
+    "evo_celsius_to_fahrenheit": {
+      "id": "evo_celsius_to_fahrenheit",
+      "label": "将输入的摄氏温度数值转换为对应的华氏温度数值",
+      "dir": "E:\\GitHub\\LLM_vtuber\\LLM_v2\\domains\\evo_celsius_to_fahrenheit",
+      "risk": "R0",
+      "status": "active",
+      "source": "evolve",
+      "session_id": null,
+      "tools": [
+        "evo_celsius_to_fahrenheit"
+      ],
+      "created_at": "2026-10-26 13:01:02",
+      "admitted_at": "2026-10-26 13:01:02",
+      "suspended_at": null,
+      "reason": "",
+      "created_new": true,
+      "snapshot": "",
+      "quarantine_path": "",
+      "budget_calls": 500,
+      "stage": "derived",
+      "stage_at": null,
+      "stage_note": "",
+      "stats": {
+        "calls": 0,
+        "success": 0,
+        "failures": 0,
+        "consecutive_failures": 0,
+        "avg_ms": 0,
+        "last_ms": 0,
+        "last_used": null,
+        "recent": []
+      },
+      "gates": {
+        "g1_static": {
+          "passed": true
+        },
+        "g2_smoke": {
+          "passed": true
+        },
+        "g3_tools": {
+          "passed": true,
+          "executed": [],
+          "skipped": [
+            {
+              "tool": "evo_celsius_to_fahrenheit",
+              "reason": "必填参数无默认值: celsius"
+            }
+          ]
+        }
+      }
+    },
+    "spec_workflow": {
+      "id": "spec_workflow",
+      "label": "规格驱动交付流程",
+      "dir": "E:\\GitHub\\LLM_vtuber\\LLM_v2\\domains\\spec_workflow",
+      "risk": "R1",
+      "status": "active",
+      "source": "explicit",
+      "session_id": null,
+      "tools": [
+        "spec_triage",
+        "spec_create",
+        "spec_list",
+        "spec_show",
+        "spec_approve",
+        "spec_amend",
+        "spec_requirements",
+        "spec_record",
+        "spec_review",
+        "spec_fix_plan",
+        "spec_bug_report"
+      ],
+      "created_at": "2026-10-28 21:10:01",
+      "admitted_at": "2026-10-30 21:54:05",
+      "suspended_at": null,
+      "reason": "",
+      "created_new": false,
+      "snapshot": "E:\\GitHub\\LLM_vtuber\\persona\\capability_snapshots\\spec_workflow\\20261030-215405",
+      "quarantine_path": "",
+      "budget_calls": 500,
+      "stage": "derived",
+      "stage_at": null,
+      "stage_note": "",
+      "stats": {
+        "calls": 0,
+        "success": 0,
+        "failures": 0,
+        "consecutive_failures": 0,
+        "avg_ms": 0,
+        "last_ms": 0,
+        "last_used": null
+      },
+      "gates": {
+        "g1_static": {
+          "passed": true
+        },
+        "g2_smoke": {
+          "passed": true
+        },
+        "g3_tools": {
+          "passed": true,
+          "executed": [
+            {
+              "tool": "spec_triage",
+              "ok": true,
+              "returned_success": true
+            },
+            {
+              "tool": "spec_list",
+              "ok": true,
+              "returned_success": true
+            }
+          ],
+          "skipped": [
+            {
+              "tool": "spec_create",
+              "reason": "R1 且 manifest 未声明 smoke 参数"
+            },
+            {
+              "tool": "spec_show",
+              "reason": "R1 且 manifest 未声明 smoke 参数"
+            },
+            {
+              "tool": "spec_approve",
+              "reason": "R1 且 manifest 未声明 smoke 参数"
+            },
+            {
+              "tool": "spec_amend",
+              "reason": "R1 且 manifest 未声明 smoke 参数"
+            },
+            {
+              "tool": "spec_requirements",
+              "reason": "R1 且 manifest 未声明 smoke 参数"
+            },
+            {
+              "tool": "spec_record",
+              "reason": "R1 且 manifest 未声明 smoke 参数"
+            },
+            {
+              "tool": "spec_review",
+              "reason": "R1 且 manifest 未声明 smoke 参数"
+            },
+            {
+              "tool": "spec_fix_plan",
+              "reason": "R1 且 manifest 未声明 smoke 参数"
+            },
+            {
+              "tool": "spec_bug_report",
+              "reason": "R1 且 manifest 未声明 smoke 参数"
+            }
+          ]
+        }
+      },
+      "trusted": true
+    },
+    "eval_lab": {
+      "id": "eval_lab",
+      "label": "评测台",
+      "dir": "E:\\GitHub\\LLM_vtuber\\LLM_v2\\domains\\eval_lab",
+      "risk": "R3",
+      "status": "active",
+      "source": "explicit",
+      "session_id": null,
+      "tools": [
+        "eval_run",
+        "eval_history",
+        "eval_show",
+        "eval_compare"
+      ],
+      "created_at": "2026-10-30 15:09:20",
+      "admitted_at": "2026-10-30 21:54:05",
+      "suspended_at": null,
+      "reason": "",
+      "created_new": false,
+      "snapshot": "E:\\GitHub\\LLM_vtuber\\persona\\capability_snapshots\\eval_lab\\20261030-215405",
+      "quarantine_path": "",
+      "budget_calls": 500,
+      "stage": "derived",
+      "stage_at": null,
+      "stage_note": "",
+      "stats": {
+        "calls": 1,
+        "success": 1,
+        "failures": 0,
+        "consecutive_failures": 0,
+        "avg_ms": 250,
+        "last_ms": 250,
+        "last_used": "2026-10-30 15:10:21",
+        "recent": [
+          1
+        ]
+      },
+      "gates": {
+        "g1_static": {
+          "passed": true
+        },
+        "g2_smoke": {
+          "passed": true
+        },
+        "g3_tools": {
+          "passed": true,
+          "executed": [
+            {
+              "tool": "eval_history",
+              "ok": true,
+              "returned_success": true
+            }
+          ],
+          "skipped": [
+            {
+              "tool": "eval_run",
+              "reason": "R3 且 manifest 未声明 smoke 参数"
+            },
+            {
+              "tool": "eval_show",
+              "reason": "R3 且 manifest 未声明 smoke 参数"
+            },
+            {
+              "tool": "eval_compare",
+              "reason": "R3 且 manifest 未声明 smoke 参数"
+            }
+          ]
+        }
+      },
+      "trusted": true
+    }
+  }
+}
